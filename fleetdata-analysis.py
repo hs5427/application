@@ -553,7 +553,8 @@ with tab_sample:
 
     st.subheader("Sampling settings")
 
-    col1, col2, col3 = st.columns([1, 1, 1])
+    col1, col2 = st.columns([1, 1])
+    # col1, col2, col3 = st.columns([1, 1, 1])
 
     with col1:
         n_samples = st.number_input(
@@ -571,18 +572,18 @@ with tab_sample:
             step=1
         )
 
-    with col3:
-        hist_bins = st.number_input(
-            "Histogram bins",
-            min_value=5,
-            max_value=500,
-            value=st.session_state["hist_bins"],
-            step=5
-        )
+    # with col3:
+    #     hist_bins = st.number_input(
+    #         "Histogram bins",
+    #         min_value=5,
+    #         max_value=500,
+    #         value=st.session_state["hist_bins"],
+    #         step=5
+    #     )
 
     st.session_state["n_samples"] = n_samples
     st.session_state["random_state"] = random_state
-    st.session_state["hist_bins"] = hist_bins
+    # st.session_state["hist_bins"] = hist_bins
 
     st.divider()
 
@@ -643,7 +644,7 @@ with tab_sample:
                 col_hist_setting, col_hist_plot = st.columns([1, 3])
 
                 with col_hist_setting:
-                    st.markdown("#### Histogram settings")
+                    # st.markdown("#### Histogram settings")
 
                     hist_x_min = st.number_input(
                         "Hist X min",
@@ -692,7 +693,7 @@ with tab_sample:
                     )
 
                     fig_hist.update_layout(
-                        height=400,
+                        height=500,
                         xaxis_title=selected_feature,
                         yaxis_title="Count",
                         showlegend=False
@@ -720,7 +721,7 @@ with tab_sample:
                 col_scatter_setting, col_scatter_plot = st.columns([1, 3])
 
                 with col_scatter_setting:
-                    st.markdown("#### Scatter settings")
+                    # st.markdown("#### Scatter settings")
 
                     scatter_x_min = st.number_input(
                         "Scatter X min",
@@ -755,7 +756,7 @@ with tab_sample:
                     )
 
                     fig_scatter.update_layout(
-                        height=550,
+                        height=500,
                         xaxis_title="Total Throughput",
                         yaxis_title=selected_feature,
                         showlegend=False
@@ -780,66 +781,6 @@ with tab_sample:
                     df_sample.describe(),
                     use_container_width=True
                 )
-
-        # # =========================
-        # # Visualization
-        # # =========================
-
-        # if st.session_state["df_sample"] is not None:
-        #     df_sample = st.session_state["df_sample"]
-
-        #     if not df_sample.empty:
-
-        #         st.subheader("Generated sample visualization")
-
-        #         st.subheader("Histogram")
-
-        #         fig_hist = px.histogram(
-        #             df_sample,
-        #             x="value",
-        #             nbins=st.session_state["hist_bins"]
-        #         )
-
-        #         fig_hist.update_layout(
-        #             height=400,
-        #             xaxis_title=selected_feature,
-        #             yaxis_title="Count",
-        #             showlegend=False,
-        #         )
-
-        #         st.plotly_chart(
-        #             fig_hist,
-        #             use_container_width=True
-        #         )
-
-        #         st.subheader("Scatter plot")
-
-        #         fig_scatter = px.scatter(
-        #             df_sample,
-        #             x="TTP",
-        #             y="value",
-        #             opacity=0.35
-        #         )
-
-        #         fig_scatter.update_layout(
-        #             height=500,
-        #             xaxis_title="TTP",
-        #             yaxis_title=selected_feature,
-        #             showlegend=False
-        #         )
-
-        #         st.plotly_chart(
-        #             fig_scatter,
-        #             use_container_width=True
-        #         )
-
-        #         st.subheader("Generated sample summary")
-
-        #         st.dataframe(
-        #             df_sample.describe(),
-        #             use_container_width=True
-        #         )
-
 
 
 # =========================
