@@ -5,8 +5,11 @@ import numpy as np
 import plotly.express as px
 from mixed_weibull import fit_by_throughput_percentile
 from mixed_weibull import build_global_mixture_weibull_cdf
+from mixed_weibull import make_weibull_param_coefficients
+from mixed_weibull import plot_weibull_parameter_trends
 from sampling import build_bivariate_sampler
-from validation import make_validation_table, make_validation_metrics, plot_validation_diagnostics
+from validation import make_qq_table_by_ttp, plot_qq_by_percentile_grid, plot_qq_by_ttp_grid
+from quantile_correction import apply_quantile_correction
 
 # =========================
 # Page config
@@ -26,8 +29,8 @@ st.title("Fleet Data Analysis App")
 
 default_keys = {
     # 既存キー
-    "fleetdata_path": "/Users/hisashi/python_projects/data_science/アプリ/data/fleetdata.xlsx",
-    "throughput_quantile_path": "/Users/hisashi/python_projects/data_science/アプリ/data/TTP_Percentile.xlsx",
+    "fleetdata_path": "/Users/hisashi/Desktop/data/data.xlsx",
+    "throughput_quantile_path": "/Users/hisashi/Desktop/data/Percentile.xlsx",
     "fleetdata_sheet_names": [],
     "selected_feature": None,
     "df_fleetdata": None,
@@ -40,6 +43,11 @@ default_keys = {
     "use_quantile_correction": False,
     "df_fit_results_dict": {},
     "global_cdf": None,
+    "df_weibull_poly_coefficients": None,
+    "df_weibull_param_coefficients": None,
+
+    # Tab4用
+    "use_quantile_correction": False,
 
     # 後続用
     "n_samples": 10_000,
@@ -375,7 +383,7 @@ with tab_fit:
 
     st.subheader("Model settings")
 
-    if model_type in ["混合ワイブルモデル", "混合正規分布モデル"]:
+    if model_type == "混合ワイブルモデル":
 
         col1, col2 = st.columns([1, 1])
 
@@ -386,7 +394,7 @@ with tab_fit:
                 current_n_components = 2
 
             selected_n_components = st.selectbox(
-                "次数",
+                "混合ワイブルの項数",
                 options=[1, 2, 3],
                 index=[1, 2, 3].index(current_n_components)
             )
@@ -394,17 +402,31 @@ with tab_fit:
             st.session_state["selected_n_components"] = selected_n_components
 
         with col2:
-            use_quantile_correction = st.checkbox(
-                "分位点補正を行う",
-                value=st.session_state["use_quantile_correction"]
+            weibull_param_fit_method = st.selectbox(
+                "TTP方向のパラメータ補完方法",
+                options=[
+                    "3次スプライン補完",
+                    "3次多項式"
+                ],
+                index=[
+                    "3次スプライン補完",
+                    "3次多項式"
+                ].index(
+                    st.session_state.get(
+                        "weibull_param_fit_method",
+                        "3次スプライン補完"
+                    )
+                )
             )
 
-            st.session_state["use_quantile_correction"] = use_quantile_correction
+            st.session_state["weibull_param_fit_method"] = weibull_param_fit_method
 
         st.info(
-            f"選択中: {model_type} / {selected_n_components}成分 / "
-            f"分位点補正: {'あり' if use_quantile_correction else 'なし'}"
+            f"選択中: {model_type} / "
+            f"{selected_n_components}項 / "
+            f"TTP方向: {weibull_param_fit_method} / "
         )
+
 
     elif model_type == "2次元スプライン補完":
 
@@ -457,12 +479,52 @@ with tab_fit:
                         )
 
                     else:
+                        method_ui = st.session_state["weibull_param_fit_method"]
+
+                        # ==================================
+                        # ワイブルパラメータ係数出力
+                        # ==================================
+
+                        method_map = {
+                            "3次スプライン補完": "spline",
+                            "3次多項式": "poly3"
+                        }
+
+                        param_fit_method = method_map[method_ui]
+
                         global_cdf = build_global_mixture_weibull_cdf(
                             df_fit_results_dict,
-                            n_components=n_components
+                            n_components=n_components,
+                            q_col="TTP_Percentile",
+                            param_fit_method=param_fit_method
+                        )
+                        st.session_state["global_cdf"] = global_cdf
+
+                        df_coef = make_weibull_param_coefficients(
+                            df_fit=df_fit,
+                            n_components=n_components,
+                            q_col="TTP_Percentile",
+                            method=param_fit_method
                         )
 
-                        st.session_state["global_cdf"] = global_cdf
+                        st.session_state["df_weibull_param_coefficients"] = df_coef
+
+                        method_map = {
+                            "3次スプライン補完": "spline",
+                            "3次多項式": "poly3"
+                        }
+
+                        param_fit_method = method_map[
+                            st.session_state["weibull_param_fit_method"]
+                        ]
+
+                        fig_param = plot_weibull_parameter_trends(
+                            df_fit=df_fit,
+                            n_components=n_components,
+                            q_col="TTP_Percentile",
+                            param_fit_method=method_map[st.session_state["weibull_param_fit_method"]]
+                        )
+                        st.session_state["df_weibull_param_coefficients"] = df_coef
 
                         st.success(
                             f"混合ワイブルモデル {n_components}成分のフィッティングとGlobal model作成が完了しました。"
@@ -526,7 +588,6 @@ with tab_fit:
     # =========================
 
     st.subheader("Fit results")
-
     if st.session_state["df_fit_results_dict"]:
         for n, df_fit in st.session_state["df_fit_results_dict"].items():
             with st.expander(f"{n} component fit result"):
@@ -534,6 +595,57 @@ with tab_fit:
                     st.dataframe(df_fit, use_container_width=True)
                 else:
                     st.info("No fit result.")
+    else:
+        st.info("No fitting result yet.")
+
+    
+    st.subheader("Weibull parameter coefficients")
+
+    df_coef = st.session_state.get("df_weibull_param_coefficients")
+
+    if df_coef is not None and not df_coef.empty:
+
+        st.dataframe(
+            df_coef,
+            use_container_width=True
+        )
+
+    else:
+        st.info("No Weibull parameter coefficient result yet.")
+
+
+    st.subheader("Weibull parameter trends")
+    if st.session_state["df_fit_results_dict"]:
+
+        n_components = st.session_state["selected_n_components"]
+
+        df_fit = st.session_state["df_fit_results_dict"].get(n_components)
+
+        if df_fit is not None and not df_fit.empty:
+
+            method_map = {
+                "3次スプライン補完": "spline",
+                "3次多項式": "poly3"
+            }
+
+            fig_param = plot_weibull_parameter_trends(
+                df_fit=df_fit,
+                n_components=n_components,
+                q_col="TTP_Percentile",
+                param_fit_method=method_map[st.session_state["weibull_param_fit_method"]]
+            )
+
+            if fig_param is not None:
+                st.plotly_chart(
+                    fig_param,
+                    use_container_width=True
+                )
+            else:
+                st.info("No parameter trend plot available.")
+
+        else:
+            st.info("No fit result for selected component.")
+
     else:
         st.info("No fitting result yet.")
 
@@ -553,8 +665,7 @@ with tab_sample:
 
     st.subheader("Sampling settings")
 
-    col1, col2 = st.columns([1, 1])
-    # col1, col2, col3 = st.columns([1, 1, 1])
+    col1, col2, col3 = st.columns([1, 1, 1])
 
     with col1:
         n_samples = st.number_input(
@@ -572,18 +683,18 @@ with tab_sample:
             step=1
         )
 
-    # with col3:
-    #     hist_bins = st.number_input(
-    #         "Histogram bins",
-    #         min_value=5,
-    #         max_value=500,
-    #         value=st.session_state["hist_bins"],
-    #         step=5
-    #     )
+    with col3:
+        use_quantile_correction = st.checkbox(
+            "Apply quantile correction",
+            value=st.session_state.get(
+                "use_quantile_correction",
+                False
+            )
+        )
 
     st.session_state["n_samples"] = n_samples
     st.session_state["random_state"] = random_state
-    # st.session_state["hist_bins"] = hist_bins
+    st.session_state["use_quantile_correction"] = use_quantile_correction
 
     st.divider()
 
@@ -612,7 +723,25 @@ with tab_sample:
                     random_state=st.session_state["random_state"]
                 )
 
+                # =========================
+                # Quantile correction
+                # =========================
+
+                if st.session_state["use_quantile_correction"]:
+                    df_sample = apply_quantile_correction(
+                        df_sample=df_sample,
+                        df_reference=st.session_state["df_long"],
+                        global_cdf=st.session_state["global_cdf"],
+                        q_col="TTP_Percentile",
+                        p_col="value_Percentile",
+                        value_col="value"
+                    )
+
                 st.session_state["df_sample"] = df_sample
+
+                if "value_raw" in df_sample.columns:
+                    st.write("Raw mean:", df_sample["value_raw"].mean())
+                    st.write("Corrected mean:", df_sample["value"].mean())
 
                 st.success("Random samples generated successfully.")
 
@@ -803,96 +932,79 @@ with tab_valid:
     else:
         st.subheader("Validation settings")
 
-        col1, col2 = st.columns([1, 1])
+        target_percentiles = [
+            0.01, 0.25, 0.50, 0.75,
+            0.90, 0.95, 0.99, 0.998
+        ]
 
-        with col1:
-            n_bins = st.number_input(
-                "TTP bin count",
-                min_value=3,
-                max_value=30,
-                value=8,
-                step=1
-            )
-
-        with col2:
-            st.write("")
-            st.write("")
-            run_validation = st.button(
-                "Run validation",
-                key="run_validation"
-            )
+        run_validation = st.button(
+            "Run validation",
+            key="run_validation"
+        )
 
         if run_validation:
             try:
-                df_validation = make_validation_table(
+                df_qq = make_qq_table_by_ttp(
                     df_long=df_long,
                     df_sample=df_sample,
+                    percentiles=target_percentiles,
                     q_col="TTP_Percentile",
                     p_col="value_Percentile",
                     value_col="value",
-                    n_bins=n_bins
+                    ttp_bin_width=2.5
                 )
 
-                df_metrics = make_validation_metrics(
-                    df_validation
-                )
+                st.session_state["df_validation"] = df_qq
 
-                st.session_state["df_validation"] = df_validation
-                st.session_state["df_validation_metrics"] = df_metrics
-
-                st.success("Validation completed.")
+                if df_qq.empty:
+                    st.warning("Q-Q table is empty. Check TTP_Percentile and value_Percentile values.")
+                else:
+                    st.success("Validation completed.")
 
             except Exception as e:
                 st.error(f"Validation failed: {e}")
 
         st.divider()
 
-        if st.session_state.get("df_validation") is not None:
+        # =========================
+        # Q-Q Plot
+        # =========================
 
-            df_validation = st.session_state["df_validation"]
-            df_metrics = st.session_state["df_validation_metrics"]
+        st.subheader("Q-Q plot")
 
-            st.subheader("Validation metrics")
+        df_qq = st.session_state.get("df_validation")
 
-            if df_metrics is not None and not df_metrics.empty:
-                st.dataframe(
-                    df_metrics,
-                    use_container_width=True
-                )
-            else:
-                st.info("No metrics available.")
-
-            st.subheader("Validation plots")
-
+        if df_qq is not None and not df_qq.empty:
             try:
-                fig_val = plot_validation_diagnostics(
-                    df_long=df_long,
-                    df_sample=df_sample,
-                    df_validation=df_validation,
+                fig_qq = plot_qq_by_ttp_grid(
+                    df_qq=df_qq,
                     selected_feature=selected_feature,
                     q_col="TTP_Percentile",
                     p_col="value_Percentile",
-                    value_col="value"
+                    n_cols=4
                 )
 
-                st.plotly_chart(
-                    fig_val,
-                    use_container_width=True
-                )
+                if fig_qq is not None:
+                    st.plotly_chart(
+                        fig_qq,
+                        use_container_width=True
+                    )
+                else:
+                    st.info("No Q-Q plot available.")
 
             except Exception as e:
-                st.error(f"Failed to plot validation diagnostics: {e}")
+                st.error(f"Failed to plot Q-Q plot: {e}")
 
-            st.subheader("Validation table")
+            st.subheader("Q-Q table")
 
-            if df_validation is not None and not df_validation.empty:
-                st.dataframe(
-                    df_validation,
-                    use_container_width=True
-                )
-            else:
-                st.info("No validation result.")
+            st.dataframe(
+                df_qq,
+                use_container_width=True
+            )
 
+        else:
+            st.info("No Q-Q result yet.")
+            
 
 # =========================
 # Tab 6: Export
@@ -901,37 +1013,97 @@ with tab_valid:
 with tab_export:
     st.header("6. Export")
 
-    st.subheader("Download results")
+    st.subheader("Export settings")
 
-    if st.session_state["df_long"] is not None:
-        csv_long = st.session_state["df_long"].to_csv(index=False).encode("utf-8-sig")
-        st.download_button(
-            label="Download long format data",
-            data=csv_long,
-            file_name="dod_long_data.csv",
-            mime="text/csv"
-        )
+    file_prefix = st.text_input(
+        "Output file name",
+        value="fleetdata_analysis_result",
+        placeholder="例: DOD_mixed_weibull_result"
+    )
 
-    if (
-        st.session_state["df_sample"] is not None
-        and not st.session_state["df_sample"].empty
-    ):
-        csv_sample = st.session_state["df_sample"].to_csv(index=False).encode("utf-8-sig")
-        st.download_button(
-            label="Download generated samples",
-            data=csv_sample,
-            file_name="generated_samples.csv",
-            mime="text/csv"
-        )
+    export_sample = st.checkbox(
+        "Export sampling data",
+        value=True
+    )
 
-    if (
-        st.session_state["df_corrected"] is not None
-        and not st.session_state["df_corrected"].empty
-    ):
-        csv_corrected = st.session_state["df_corrected"].to_csv(index=False).encode("utf-8-sig")
-        st.download_button(
-            label="Download corrected samples",
-            data=csv_corrected,
-            file_name="corrected_samples.csv",
-            mime="text/csv"
-        )
+    export_fit_params = st.checkbox(
+        "Export fitting parameters",
+        value=True
+    )
+
+    export_qq = st.checkbox(
+        "Export Q-Q plot data",
+        value=True
+    )
+
+    st.divider()
+
+    # =========================
+    # Sampling data
+    # =========================
+
+    if export_sample:
+        st.subheader("Sampling data")
+
+        df_sample = st.session_state.get("df_sample")
+
+        if df_sample is not None and not df_sample.empty:
+            csv_sample = df_sample.to_csv(index=False).encode("utf-8-sig")
+
+            st.download_button(
+                label="Download sampling data CSV",
+                data=csv_sample,
+                file_name=f"{file_prefix}_sampling_data.csv",
+                mime="text/csv",
+                key="download_sampling_data"
+            )
+        else:
+            st.info("No sampling data available.")
+
+    # =========================
+    # Fitting parameters
+    # =========================
+
+    if export_fit_params:
+        st.subheader("Fitting parameters")
+
+        df_fit_results_dict = st.session_state.get("df_fit_results_dict", {})
+
+        if df_fit_results_dict:
+            for n_components, df_fit in df_fit_results_dict.items():
+                if df_fit is not None and not df_fit.empty:
+                    csv_fit = df_fit.to_csv(index=False).encode("utf-8-sig")
+
+                    st.download_button(
+                        label=f"Download fitting parameters CSV ({n_components} components)",
+                        data=csv_fit,
+                        file_name=f"{file_prefix}_fit_params_{n_components}components.csv",
+                        mime="text/csv",
+                        key=f"download_fit_params_{n_components}"
+                    )
+                else:
+                    st.info(f"No fitting parameters for {n_components} components.")
+        else:
+            st.info("No fitting parameter data available.")
+
+    # =========================
+    # Q-Q plot data
+    # =========================
+
+    if export_qq:
+        st.subheader("Q-Q plot data")
+
+        df_qq = st.session_state.get("df_validation")
+
+        if df_qq is not None and not df_qq.empty:
+            csv_qq = df_qq.to_csv(index=False).encode("utf-8-sig")
+
+            st.download_button(
+                label="Download Q-Q plot data CSV",
+                data=csv_qq,
+                file_name=f"{file_prefix}_qq_plot_data.csv",
+                mime="text/csv",
+                key="download_qq_plot_data"
+            )
+        else:
+            st.info("No Q-Q plot data available.")

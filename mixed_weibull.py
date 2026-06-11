@@ -63,20 +63,20 @@ def residuals(params, x, p_obs, n_components):
 # =========================
 
 def make_initial_params(x, n_components):
-    """
-    etaはxの分位点でばらす。
-    betaはすべて2.0。
-    weightは均等。
-    """
-
-    quantiles = np.linspace(20, 80, n_components)
+    if n_components == 1:
+        quantiles = [50]
+    elif n_components == 2:
+        quantiles = [30, 80]
+    elif n_components == 3:
+        quantiles = [10, 50, 90]
+    else:
+        quantiles = np.linspace(10, 90, n_components)
 
     eta_init = np.percentile(x, quantiles)
     beta_init = np.full(n_components, 2.0)
 
     log_eta_init = np.log(eta_init)
     log_beta_init = np.log(beta_init)
-
     z_weight_init = np.zeros(n_components)
 
     params = []
@@ -88,6 +88,33 @@ def make_initial_params(x, n_components):
     params.extend(z_weight_init)
 
     return np.array(params, dtype=float)
+
+# def make_initial_params(x, n_components):
+#     """
+#     etaはxの分位点でばらす。
+#     betaはすべて2.0。
+#     weightは均等。
+#     """
+
+#     quantiles = np.linspace(20, 80, n_components)
+
+#     eta_init = np.percentile(x, quantiles)
+#     beta_init = np.full(n_components, 2.0)
+
+#     log_eta_init = np.log(eta_init)
+#     log_beta_init = np.log(beta_init)
+
+#     z_weight_init = np.zeros(n_components)
+
+#     params = []
+
+#     for k in range(n_components):
+#         params.append(log_eta_init[k])
+#         params.append(log_beta_init[k])
+
+#     params.extend(z_weight_init)
+
+#     return np.array(params, dtype=float)
 
 
 # =========================
@@ -211,7 +238,8 @@ def fit_by_throughput_percentile(df_long, n_components=2):
 def build_global_mixture_weibull_cdf(
     df_fit_results_dict,
     n_components=2,
-    q_col="TTP_Percentile"
+    q_col="TTP_Percentile",
+    param_fit_method="spline"
 ):
     """
     df_fit_results_dict から、任意の ThroughputPercentile q に対する
@@ -263,19 +291,30 @@ def build_global_mixture_weibull_cdf(
         beta_values = df_fit[beta_col].to_numpy(dtype=float)
         w_values = df_fit[w_col].to_numpy(dtype=float)
 
-        # 正値制約のため log で補間
         eta_splines.append(
-            CubicSpline(q_values, np.log(eta_values), extrapolate=True)
+            make_param_function(
+                q_values,
+                np.log(eta_values),
+                method=param_fit_method
+            )
         )
 
         beta_splines.append(
-            CubicSpline(q_values, np.log(beta_values), extrapolate=True)
+            make_param_function(
+                q_values,
+                np.log(beta_values),
+                method=param_fit_method
+            )
         )
 
-        # weightは後で正規化する前提でそのまま補間
         weight_splines.append(
-            CubicSpline(q_values, w_values, extrapolate=True)
+            make_param_function(
+                q_values,
+                w_values,
+                method=param_fit_method
+            )
         )
+
 
     def global_cdf(x, q):
         x = np.asarray(x, dtype=float)
@@ -312,6 +351,241 @@ def build_global_mixture_weibull_cdf(
         return F
 
     return global_cdf
+
+
+def make_param_function(q_values, y_values, method="spline"):
+    q_values = np.asarray(q_values, dtype=float)
+    y_values = np.asarray(y_values, dtype=float)
+
+    if method == "spline":
+        return CubicSpline(
+            q_values,
+            y_values,
+            extrapolate=True
+        )
+
+    elif method == "poly3":
+        degree = min(3, len(q_values) - 1)
+        coef = np.polyfit(
+            q_values,
+            y_values,
+            deg=degree
+        )
+
+        return np.poly1d(coef)
+
+    else:
+        raise ValueError(
+            "param_fit_method must be 'spline' or 'poly3'."
+        )
+    
+    
+def make_weibull_param_coefficients(
+    df_fit,
+    n_components=2,
+    q_col="TTP_Percentile",
+    method="poly3"
+):
+    """
+    各ワイブルパラメータ eta, beta, w を
+    TTP_Percentile方向に近似した係数を返す。
+
+    method:
+        "poly3"  : 全体を1本の3次多項式で近似
+        "spline" : 区間ごとの3次スプライン補間
+    """
+
+    if df_fit is None or df_fit.empty:
+        return pd.DataFrame()
+
+    df_fit = df_fit.sort_values(q_col).copy()
+    q = df_fit[q_col].to_numpy(dtype=float)
+
+    rows = []
+
+    for k in range(1, n_components + 1):
+
+        param_cols = [
+            f"eta{k}",
+            f"beta{k}",
+            f"w{k}"
+        ]
+
+        for param_col in param_cols:
+
+            if param_col not in df_fit.columns:
+                continue
+
+            y = df_fit[param_col].to_numpy(dtype=float)
+
+            if method == "poly3":
+
+                degree = min(3, len(q) - 1)
+                coef = np.polyfit(q, y, deg=degree)
+
+                # np.polyfitは高次 → 低次の順
+                # degree=3なら [a3, a2, a1, a0]
+                coef_full = np.full(4, np.nan)
+                coef_full[-len(coef):] = coef
+
+                rows.append({
+                    "method": "poly3",
+                    "parameter": param_col,
+                    "interval_start": np.nan,
+                    "interval_end": np.nan,
+                    "formula": f"{param_col}(q) = a3*q^3 + a2*q^2 + a1*q + a0",
+                    "a3": coef_full[0],
+                    "a2": coef_full[1],
+                    "a1": coef_full[2],
+                    "a0": coef_full[3],
+                })
+
+            elif method == "spline":
+
+                spline = CubicSpline(
+                    q,
+                    y,
+                    extrapolate=True
+                )
+
+                # spline.c shape = (4, n_intervals)
+                # 各区間で:
+                # y = c0*(q-q_i)^3 + c1*(q-q_i)^2 + c2*(q-q_i) + c3
+                c = spline.c
+
+                for i in range(len(q) - 1):
+                    rows.append({
+                        "method": "spline",
+                        "parameter": param_col,
+                        "interval_start": q[i],
+                        "interval_end": q[i + 1],
+                        "formula": (
+                            f"{param_col}(q) = "
+                            f"a3*(q-{q[i]})^3 + "
+                            f"a2*(q-{q[i]})^2 + "
+                            f"a1*(q-{q[i]}) + a0"
+                        ),
+                        "a3": c[0, i],
+                        "a2": c[1, i],
+                        "a1": c[2, i],
+                        "a0": c[3, i],
+                    })
+
+            else:
+                raise ValueError(
+                    "method must be 'poly3' or 'spline'."
+                )
+
+    return pd.DataFrame(rows)
+
+
+def plot_weibull_parameter_trends(
+    df_fit,
+    n_components=2,
+    q_col="TTP_Percentile",
+    param_fit_method="spline",
+    n_grid=300
+):
+    """
+    TTP_Percentileごとの eta, beta, w の実測点と
+    TTP方向にフィットした曲線を可視化する。
+    """
+
+    if df_fit is None or df_fit.empty:
+        return None
+
+    df_fit = df_fit.sort_values(q_col).copy()
+
+    q_values = df_fit[q_col].to_numpy(dtype=float)
+    q_grid = np.linspace(q_values.min(), q_values.max(), n_grid)
+
+    fig = make_subplots(
+        rows=1,
+        cols=3,
+        subplot_titles=[
+            "eta parameter",
+            "beta parameter",
+            "weight parameter"
+        ]
+    )
+
+    param_groups = [
+        ("eta", 1),
+        ("beta", 2),
+        ("w", 3)
+    ]
+
+    for param_prefix, col_idx in param_groups:
+
+        for k in range(1, n_components + 1):
+
+            param_col = f"{param_prefix}{k}"
+
+            if param_col not in df_fit.columns:
+                continue
+
+            y_values = df_fit[param_col].to_numpy(dtype=float)
+
+            # =========================
+            # Scatter: fitted parameters
+            # =========================
+            fig.add_trace(
+                go.Scatter(
+                    x=q_values,
+                    y=y_values,
+                    mode="markers",
+                    name=f"{param_col} points",
+                    legendgroup=param_col,
+                    showlegend=True
+                ),
+                row=1,
+                col=col_idx
+            )
+
+            # =========================
+            # Fit curve
+            # =========================
+            fit_func = make_param_function(
+                q_values,
+                y_values,
+                method=param_fit_method
+            )
+
+            y_fit = fit_func(q_grid)
+
+            if param_prefix == "w":
+                y_fit = np.clip(y_fit, 0, None)
+
+            fig.add_trace(
+                go.Scatter(
+                    x=q_grid,
+                    y=y_fit,
+                    mode="lines",
+                    name=f"{param_col} fit",
+                    legendgroup=param_col,
+                    showlegend=True
+                ),
+                row=1,
+                col=col_idx
+            )
+
+    fig.update_xaxes(title_text="TTP Percentile", row=1, col=1)
+    fig.update_xaxes(title_text="TTP Percentile", row=1, col=2)
+    fig.update_xaxes(title_text="TTP Percentile", row=1, col=3)
+
+    fig.update_yaxes(title_text="eta", row=1, col=1)
+    fig.update_yaxes(title_text="beta", row=1, col=2)
+    fig.update_yaxes(title_text="weight", row=1, col=3)
+
+    fig.update_layout(
+        height=550,
+        width=1500,
+        title="Weibull parameter trends with fitted curves",
+        legend_title="Parameter"
+    )
+
+    return fig
+
 
 # # =========================
 # # 可視化
