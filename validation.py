@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import math
@@ -100,7 +101,7 @@ def plot_qq_by_percentile_grid(
         rows=2,
         cols=4,
         subplot_titles=subplot_titles,
-        vertical_spacing=0.18
+        vertical_spacing=0.25
     )
 
     fig.update_layout(
@@ -238,7 +239,7 @@ def plot_qq_by_ttp_grid(
         cols=n_cols,
         subplot_titles=[f"TTP={ttp:g}" for ttp in ttp_values],
         horizontal_spacing=0.06,
-        vertical_spacing=0.10
+        vertical_spacing=0.25
     )
 
     max_val = max(
@@ -669,6 +670,315 @@ def plot_sample_distribution_overlay(
             orientation="h",
             yanchor="bottom",
             y=1.02,
+            xanchor="right",
+            x=1
+        )
+    )
+
+    return fig
+
+
+def plot_sample_pdf_histogram(
+    df_sample,
+    selected_feature="value",
+    value_col="value",
+    bins=50
+):
+    import numpy as np
+    import plotly.graph_objects as go
+    from scipy.stats import gaussian_kde
+
+    if df_sample is None or df_sample.empty:
+        return None
+
+    x = df_sample[value_col].dropna().to_numpy(dtype=float)
+
+    if len(x) < 2:
+        return None
+
+    x_min = float(np.min(x))
+    x_max = float(np.max(x))
+
+    x_grid = np.linspace(x_min, x_max, 500)
+
+    kde = gaussian_kde(x)
+    pdf = kde(x_grid)
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Histogram(
+            x=x,
+            nbinsx=bins,
+            histnorm="probability density",
+            opacity=0.35,
+            name="Sample histogram"
+        )
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=x_grid,
+            y=pdf,
+            mode="lines",
+            name="Sample PDF"
+        )
+    )
+
+    fig.update_layout(
+        height=600,
+        title="Sample PDF + Histogram",
+        xaxis_title=selected_feature,
+        yaxis_title="Density",
+        bargap=0.02,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        )
+    )
+
+    return fig
+
+
+def plot_cdf_validation(
+    df_sample,
+    df_reference,
+    selected_feature="value",
+    value_col="value",
+    p_col="value_Percentile",
+    q_col="TTP_Percentile",
+    analysis_mode="Independent",
+    target_ttp=None
+):
+    import numpy as np
+    import plotly.graph_objects as go
+
+    if df_sample is None or df_sample.empty:
+        return None
+
+    if analysis_mode == "TTP dependent":
+        if target_ttp is None:
+            return None
+
+        df_sample_plot = df_sample[
+            np.isclose(
+                df_sample[q_col].astype(float),
+                float(target_ttp)
+            )
+        ].copy()
+
+        df_ref_plot = df_reference[
+            np.isclose(
+                df_reference[q_col].astype(float),
+                float(target_ttp)
+            )
+        ].copy()
+
+    else:
+        df_sample_plot = df_sample.copy()
+        df_ref_plot = df_reference.copy()
+
+    sample_values = df_sample_plot[value_col].dropna().to_numpy(dtype=float)
+
+    if len(sample_values) < 2:
+        return None
+
+    x_sorted = np.sort(sample_values)
+    y_cdf = np.arange(1, len(x_sorted) + 1) / len(x_sorted)
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Scatter(
+            x=x_sorted,
+            y=y_cdf,
+            mode="lines",
+            name="Generated CDF"
+        )
+    )
+
+    if p_col in df_ref_plot.columns and value_col in df_ref_plot.columns:
+        df_ref_plot = df_ref_plot[[p_col, value_col]].dropna().copy()
+        df_ref_plot[p_col] = df_ref_plot[p_col].astype(float)
+        df_ref_plot[value_col] = df_ref_plot[value_col].astype(float)
+
+        fig.add_trace(
+            go.Scatter(
+                x=df_ref_plot[value_col],
+                y=df_ref_plot[p_col],
+                mode="markers+text",
+                text=(df_ref_plot[p_col] * 100).map(lambda x: f"{x:g}%"),
+                textposition="top center",
+                name="Original percentile points"
+            )
+        )
+
+    title = "CDF validation"
+
+    if analysis_mode == "TTP dependent":
+        title += f" - TTP={target_ttp:g}"
+
+    fig.update_layout(
+        height=600,
+        title=title,
+        xaxis_title=selected_feature,
+        yaxis_title="Cumulative probability",
+        yaxis=dict(
+            range=[0, 1],
+            showgrid=True
+        ),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        )
+    )
+
+    return fig
+
+
+def plot_cdf_validation_grid(
+    df_sample,
+    df_reference,
+    selected_feature="value",
+    value_col="value",
+    p_col="value_Percentile",
+    q_col="TTP_Percentile",
+    ttp_bin_width=0.025
+):
+    import numpy as np
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    if df_sample is None or df_sample.empty:
+        return None
+
+    if q_col not in df_reference.columns:
+        return None
+
+    if q_col not in df_sample.columns:
+        raise ValueError(
+            f"df_sampleに {q_col} 列がありません。"
+            f"現在の列: {df_sample.columns.tolist()}"
+        )
+
+    ttp_values = sorted(
+        df_reference[q_col].dropna().astype(float).unique()
+    )
+
+    n_plots = min(len(ttp_values), 8)
+
+    fig = make_subplots(
+        rows=2,
+        cols=4,
+        subplot_titles=[
+            f"TTP={float(v):g}"
+            for v in ttp_values[:n_plots]
+        ],
+        vertical_spacing=0.18,
+        horizontal_spacing=0.08
+    )
+
+    for i, ttp in enumerate(ttp_values[:n_plots]):
+
+        row = i // 4 + 1
+        col = i % 4 + 1
+
+        # =========================
+        # Generated sample CDF
+        # =========================
+        # サンプル側のTTP_Percentileは連続値の可能性があるため、
+        # 実測TTP点の周辺binで抽出する。
+
+        lower = float(ttp) - ttp_bin_width / 2
+        upper = float(ttp) + ttp_bin_width / 2
+
+        df_s = df_sample[
+            (df_sample[q_col].astype(float) >= lower)
+            & (df_sample[q_col].astype(float) < upper)
+        ].copy()
+
+        if not df_s.empty:
+            sample_values = (
+                df_s[value_col]
+                .dropna()
+                .to_numpy(dtype=float)
+            )
+
+            if len(sample_values) >= 2:
+                x_sorted = np.sort(sample_values)
+                y_cdf = np.arange(1, len(x_sorted) + 1) / len(x_sorted)
+
+                fig.add_trace(
+                    go.Scatter(
+                        x=x_sorted,
+                        y=y_cdf,
+                        mode="lines",
+                        name="Generated CDF",
+                        line=dict(width=3),
+                        showlegend=(i == 0)
+                    ),
+                    row=row,
+                    col=col
+                )
+
+        # =========================
+        # Original CDF
+        # =========================
+
+        df_r = df_reference[
+            np.isclose(
+                df_reference[q_col].astype(float),
+                float(ttp)
+            )
+        ].copy()
+
+        if not df_r.empty:
+            df_r = df_r[[p_col, value_col]].dropna().copy()
+            df_r[p_col] = df_r[p_col].astype(float)
+            df_r[value_col] = df_r[value_col].astype(float)
+            df_r = df_r.sort_values(value_col)
+
+            fig.add_trace(
+                go.Scatter(
+                    x=df_r[value_col],
+                    y=df_r[p_col],
+                    mode="markers",
+                    marker=dict(size=8),
+                    line=dict(dash="dash"),
+                    name="Original CDF",
+                    showlegend=(i == 0)
+                ),
+                row=row,
+                col=col
+            )
+
+        fig.update_yaxes(
+            range=[0, 1],
+            title_text="CDF" if col == 1 else None,
+            row=row,
+            col=col
+        )
+
+        fig.update_xaxes(
+            title_text=selected_feature if row == 2 else None,
+            row=row,
+            col=col
+        )
+
+    fig.update_layout(
+        height=1200,
+        title="CDF validation by TTP Percentile",
+        margin=dict(t=120, b=80, l=60, r=30),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.04,
             xanchor="right",
             x=1
         )
