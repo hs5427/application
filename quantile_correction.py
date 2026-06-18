@@ -2,10 +2,6 @@ import numpy as np
 import pandas as pd
 from scipy.interpolate import PchipInterpolator
 
-import numpy as np
-import pandas as pd
-from scipy.interpolate import PchipInterpolator
-
 
 def apply_quantile_correction(
     df_sample,
@@ -15,14 +11,6 @@ def apply_quantile_correction(
     p_col="value_Percentile",
     value_col="value"
 ):
-    """
-    生成サンプルのvalueを、元データの分位点カーブに合わせて補正する。
-
-    処理:
-    1. サンプル値 x から u = F_model(x|q) を計算
-    2. 元データ側の q における PPF_ref(u|q) を補間
-    3. value を補正値に置換
-    """
 
     df_sample = df_sample.copy()
     df_ref = df_reference[[q_col, p_col, value_col]].dropna().copy()
@@ -84,65 +72,62 @@ def apply_quantile_correction(
 
     return df_sample
 
-# def apply_quantile_correction(
-#     df_sample,
-#     df_reference,
-#     q_col="TTP_Percentile",
-#     p_col="value_Percentile",
-#     value_col="value"
-# ):
-#     """
-#     サンプル値を元データの分位点に合わせて補正
-#     """
 
-#     df_sample = df_sample.copy()
+def apply_independent_quantile_correction(
+    df_sample,
+    df_reference,
+    global_cdf,
+    p_col="value_Percentile",
+    value_col="value"
+):
+    """
+    Independent mode用の分位点補正。
 
-#     corrected_values = []
+    df_reference:
+        value_Percentile | value
 
-#     for q, df_group in df_sample.groupby(q_col):
+    df_sample:
+        value
 
-#         df_ref_same_q = df_reference[
-#             df_reference[q_col] == q
-#         ]
+    処理:
+        1. 補正前value xをモデルCDFでuに変換
+        2. 元データ側のPPF_ref(u)で補正値に変換
+    """
 
-#         if len(df_ref_same_q) < 2:
-#             corrected_values.extend(
-#                 df_group[value_col].tolist()
-#             )
-#             continue
+    df_sample = df_sample.copy()
+    df_ref = df_reference[[p_col, value_col]].dropna().copy()
 
-#         x_ref = df_ref_same_q[value_col].to_numpy(dtype=float)
-#         p_ref = df_ref_same_q[p_col].to_numpy(dtype=float)
+    df_ref = df_ref.sort_values(p_col)
 
-#         sort_idx = np.argsort(x_ref)
+    p_ref = df_ref[p_col].to_numpy(dtype=float)
+    x_ref = df_ref[value_col].to_numpy(dtype=float)
 
-#         x_ref = x_ref[sort_idx]
-#         p_ref = p_ref[sort_idx]
+    order = np.argsort(p_ref)
+    p_ref = p_ref[order]
+    x_ref = x_ref[order]
 
-#         cdf_interp = PchipInterpolator(
-#             x_ref,
-#             p_ref,
-#             extrapolate=True
-#         )
+    p_unique, unique_idx = np.unique(p_ref, return_index=True)
+    x_unique = x_ref[unique_idx]
 
-#         p_sample = np.clip(
-#             cdf_interp(
-#                 df_group[value_col].to_numpy(dtype=float)
-#             ),
-#             p_ref.min(),
-#             p_ref.max()
-#         )
+    if len(p_unique) < 2:
+        raise ValueError("Independent quantile correction requires at least 2 percentile points.")
 
-#         ppf_interp = PchipInterpolator(
-#             p_ref,
-#             x_ref,
-#             extrapolate=True
-#         )
+    ppf_ref = PchipInterpolator(
+        p_unique,
+        x_unique,
+        extrapolate=True
+    )
 
-#         corrected = ppf_interp(p_sample)
+    corrected_values = []
 
-#         corrected_values.extend(corrected)
+    for x in df_sample[value_col].to_numpy(dtype=float):
+        u = float(global_cdf(x, q=None))
+        u = np.clip(u, p_unique.min(), p_unique.max())
 
-#     df_sample[value_col] = corrected_values
+        corrected_x = float(ppf_ref(u))
+        corrected_values.append(corrected_x)
 
-#     return df_sample
+    df_sample[f"{value_col}_raw"] = df_sample[value_col]
+    df_sample[value_col] = corrected_values
+
+    return df_sample

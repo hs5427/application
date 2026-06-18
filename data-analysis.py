@@ -3,13 +3,43 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 import plotly.express as px
-from mixed_weibull import fit_by_throughput_percentile
-from mixed_weibull import build_global_mixture_weibull_cdf
-from mixed_weibull import make_weibull_param_coefficients
-from mixed_weibull import plot_weibull_parameter_trends
-from sampling import build_bivariate_sampler
-from validation import make_qq_table_by_ttp, plot_qq_by_percentile_grid, plot_qq_by_ttp_grid
-from quantile_correction import apply_quantile_correction
+import math
+from mixed_weibull import (
+    fit_by_throughput_percentile,
+    fit_independent_mixture_weibull,
+    build_global_mixture_weibull_cdf,
+    build_independent_mixture_weibull_cdf,
+    make_weibull_param_coefficients,
+    plot_weibull_parameter_trends,
+)
+
+from mixed_gaussian import (
+    fit_gaussian_by_throughput_percentile,
+    fit_independent_mixture_gaussian,
+    build_global_mixture_gaussian_cdf,
+    build_independent_mixture_gaussian_cdf,
+    make_gaussian_param_coefficients,
+    plot_gaussian_parameter_trends
+)
+
+from sampling import (
+    build_bivariate_sampler,
+    build_independent_sampler
+)
+from validation import (
+    make_qq_table_by_ttp,
+    plot_qq_by_percentile_grid,
+    plot_qq_by_ttp_grid,
+    plot_independent_qq,
+    make_independent_qq_table,
+    make_validation_metrics_from_qq,
+    plot_sample_distribution_overlay
+)
+
+from quantile_correction import (
+    apply_quantile_correction,
+    apply_independent_quantile_correction
+)
 
 # =========================
 # Page config
@@ -28,7 +58,7 @@ st.title("Fleet Data Analysis App")
 # =========================
 
 default_keys = {
-    # 既存キー
+    # Tab1用
     "fleetdata_path": "/Users/hisashi/Desktop/data/data.xlsx",
     "throughput_quantile_path": "/Users/hisashi/Desktop/data/Percentile.xlsx",
     "fleetdata_sheet_names": [],
@@ -36,6 +66,7 @@ default_keys = {
     "df_fleetdata": None,
     "df_long": None,
     "df_throughput_quantile": None,
+    "analysis_mode": "TTP dependent",
 
     # Tab3用
     "model_type": "混合ワイブルモデル",
@@ -57,6 +88,10 @@ default_keys = {
     "df_validation": None,
     "df_validation_metrics": None,
     "hist_bins": 50,
+
+    "param_fit_method_ui": "3次スプライン補完",
+    "df_param_coefficients": None,
+    "fig_param_trends": None,
 }
 
 for key, value in default_keys.items():
@@ -101,7 +136,7 @@ with tab_data:
 
         st.session_state["fleetdata_path"] = fleetdata_path
 
-        if st.button("Check Fleet Data file"):
+        if st.button("Check Fleet Data file", key="check_fleetdata_file"):
             try:
                 path = Path(fleetdata_path)
 
@@ -129,12 +164,15 @@ with tab_data:
 
         st.session_state["throughput_quantile_path"] = throughput_quantile_path
 
-        if st.button("Check Total Throughput file"):
+        if st.button("Check Total Throughput file", key="check_ttp_file"):
             try:
                 path = Path(throughput_quantile_path)
 
                 if not path.exists():
-                    st.error("Throughput quantile file does not exist.")
+                    st.warning(
+                        "Throughput quantile file does not exist. "
+                        "Independent data can still be loaded without this file."
+                    )
 
                 elif path.suffix.lower() not in [".xlsx", ".xls"]:
                     st.error("Please select an Excel file.")
@@ -156,7 +194,7 @@ with tab_data:
     sheet_names = st.session_state["fleetdata_sheet_names"]
 
     if len(sheet_names) == 0:
-        st.info("Fleet Data file を指定し、'Check fleet data file' を押してください。")
+        st.info("Fleet Data file を指定し、'Check Fleet Data file' を押してください。")
 
     else:
         selected_feature = st.selectbox(
@@ -175,9 +213,12 @@ with tab_data:
         # Load data
         # =========================
 
-        if st.button("Load Data"):
+        if st.button("Load Data", key="load_data"):
             try:
+                # =========================
                 # df_fleetdata
+                # =========================
+
                 df_fleetdata = pd.read_excel(
                     st.session_state["fleetdata_path"],
                     sheet_name=selected_feature,
@@ -186,35 +227,107 @@ with tab_data:
 
                 st.session_state["df_fleetdata"] = df_fleetdata
 
-                # long format
-                df_fleetdata.index.name = "TTP_Percentile"
-                df_fleetdata.columns.name = "value_Percentile"
+                # =========================
+                # Auto detect analysis mode
+                # =========================
 
-                df_long = (
-                    df_fleetdata
-                    .stack()
-                    .reset_index(name="value")
-                )
+                if len(df_fleetdata) == 1:
+                    analysis_mode = "Independent"
+                else:
+                    analysis_mode = "TTP dependent"
 
-                df_long.columns = [
-                    "TTP_Percentile",
-                    "value_Percentile",
-                    "value"
-                ]
+                st.session_state["analysis_mode"] = analysis_mode
+
+                st.info(f"Detected analysis mode: {analysis_mode}")
+
+                # =========================
+                # Long format
+                # =========================
+
+                if analysis_mode == "TTP dependent":
+
+                    df_fleetdata.index.name = "TTP_Percentile"
+                    df_fleetdata.columns.name = "value_Percentile"
+
+                    df_long = (
+                        df_fleetdata
+                        .stack()
+                        .reset_index(name="value")
+                    )
+
+                    df_long.columns = [
+                        "TTP_Percentile",
+                        "value_Percentile",
+                        "value"
+                    ]
+
+                    # =========================
+                    # df_throughput_quantile
+                    # =========================
+
+                    throughput_path = st.session_state["throughput_quantile_path"]
+
+                    if throughput_path is None or throughput_path == "":
+                        raise ValueError(
+                            "TTP dependent data requires Total Throughput data file."
+                        )
+
+                    path = Path(throughput_path)
+
+                    if not path.exists():
+                        raise FileNotFoundError(
+                            "TTP dependent data requires valid Total Throughput data file."
+                        )
+
+                    df_throughput_quantile = pd.read_excel(
+                        throughput_path
+                    )
+
+                    df_throughput_quantile.columns = [
+                        "TTP_Percentile",
+                        "TTP"
+                    ]
+
+                    st.session_state["df_throughput_quantile"] = df_throughput_quantile
+
+                else:
+
+                    df_fleetdata_one_row = df_fleetdata.iloc[[0]].copy()
+
+                    df_long = (
+                        df_fleetdata_one_row
+                        .T
+                        .reset_index()
+                    )
+
+                    df_long.columns = [
+                        "value_Percentile",
+                        "value"
+                    ]
+
+                    df_long["value_Percentile"] = df_long["value_Percentile"].astype(float)
+                    df_long["value"] = df_long["value"].astype(float)
+
+                    # TTPに依存しないため、Throughputデータは使わない
+                    st.session_state["df_throughput_quantile"] = None
 
                 st.session_state["df_long"] = df_long
 
-                # df_throughput_quantile
-                df_throughput_quantile = pd.read_excel(
-                    st.session_state["throughput_quantile_path"]
-                )
+                # =========================
+                # Reset downstream results
+                # =========================
 
-                df_throughput_quantile.columns = [
-                    "TTP_Percentile",
-                    "TTP"
-                ]
+                st.session_state["df_fit_results_dict"] = {}
+                st.session_state["global_cdf"] = None
 
-                st.session_state["df_throughput_quantile"] = df_throughput_quantile
+                st.session_state["df_sample"] = None
+                st.session_state["df_corrected"] = None
+
+                st.session_state["df_validation"] = None
+                st.session_state["df_validation_metrics"] = None
+
+                st.session_state["df_weibull_param_coefficients"] = None
+                st.session_state["fig_weibull_param_trends"] = None
 
                 st.success("Data loaded successfully.")
 
@@ -222,6 +335,19 @@ with tab_data:
                 st.error(f"Failed to load data: {e}")
 
     st.divider()
+
+    # =========================
+    # Detected mode preview
+    # =========================
+
+    st.subheader("Detected analysis mode")
+
+    st.write(
+        st.session_state.get(
+            "analysis_mode",
+            "Not detected yet."
+        )
+    )
 
     # =========================
     # Data preview
@@ -239,13 +365,21 @@ with tab_data:
 
     st.subheader("df_throughput_quantile")
 
-    if st.session_state["df_throughput_quantile"] is not None:
-        st.dataframe(
-            st.session_state["df_throughput_quantile"],
-            use_container_width=True
-        )
+    if st.session_state.get("analysis_mode") == "TTP dependent":
+
+        if st.session_state["df_throughput_quantile"] is not None:
+            st.dataframe(
+                st.session_state["df_throughput_quantile"],
+                use_container_width=True
+            )
+        else:
+            st.info("df_throughput_quantile is not loaded yet.")
+
+    elif st.session_state.get("analysis_mode") == "Independent":
+        st.info("Independent modeでは df_throughput_quantile は使用しません。")
+
     else:
-        st.info("df_throughput_quantile is not loaded yet.")
+        st.info("Analysis mode is not detected yet.")
         
 
 # =========================
@@ -267,6 +401,17 @@ with tab_viz:
         st.info("Please load data first.")
 
     else:
+
+        analysis_mode = st.session_state.get(
+            "analysis_mode",
+            "TTP dependent"
+        )
+
+        color_col = (
+            "TTP_Percentile"
+            if "TTP_Percentile" in df_long.columns
+            else None
+        )
 
         # =========================
         # Plot settings
@@ -317,7 +462,7 @@ with tab_viz:
                 df_long,
                 x="value",
                 y="value_Percentile",
-                color="TTP_Percentile",
+                color=color_col,
                 markers=True
             )
 
@@ -325,7 +470,8 @@ with tab_viz:
                 height=plot_height,
                 xaxis_title=selected_feature,
                 yaxis_title="Cumulative Probability",
-                legend_title="TTP_Percentile"
+                legend_title="TTP_Percentile" if color_col else None,
+                showlegend=True if color_col else False
             )
 
             fig.update_xaxes(
@@ -383,7 +529,7 @@ with tab_fit:
 
     st.subheader("Model settings")
 
-    if model_type == "混合ワイブルモデル":
+    if model_type in ["混合ワイブルモデル", "混合正規分布モデル"]:
 
         col1, col2 = st.columns([1, 1])
 
@@ -394,7 +540,7 @@ with tab_fit:
                 current_n_components = 2
 
             selected_n_components = st.selectbox(
-                "混合ワイブルの項数",
+                "混合モデルの項数",
                 options=[1, 2, 3],
                 index=[1, 2, 3].index(current_n_components)
             )
@@ -402,7 +548,7 @@ with tab_fit:
             st.session_state["selected_n_components"] = selected_n_components
 
         with col2:
-            weibull_param_fit_method = st.selectbox(
+            param_fit_method_ui = st.selectbox(
                 "TTP方向のパラメータ補完方法",
                 options=[
                     "3次スプライン補完",
@@ -413,19 +559,68 @@ with tab_fit:
                     "3次多項式"
                 ].index(
                     st.session_state.get(
-                        "weibull_param_fit_method",
+                        "param_fit_method_ui",
                         "3次スプライン補完"
                     )
                 )
             )
 
-            st.session_state["weibull_param_fit_method"] = weibull_param_fit_method
+            st.session_state["param_fit_method_ui"] = param_fit_method_ui
+
+            # 既存ワイブルコードとの互換用
+            st.session_state["weibull_param_fit_method"] = param_fit_method_ui
 
         st.info(
             f"選択中: {model_type} / "
             f"{selected_n_components}項 / "
-            f"TTP方向: {weibull_param_fit_method} / "
+            f"TTP方向: {param_fit_method_ui}"
         )
+
+    # st.subheader("Model settings")
+
+    # if model_type == "混合ワイブルモデル":
+
+    #     col1, col2 = st.columns([1, 1])
+
+    #     with col1:
+    #         current_n_components = st.session_state.get("selected_n_components", 2)
+
+    #         if current_n_components not in [1, 2, 3]:
+    #             current_n_components = 2
+
+    #         selected_n_components = st.selectbox(
+    #             "混合ワイブルの項数",
+    #             options=[1, 2, 3],
+    #             index=[1, 2, 3].index(current_n_components)
+    #         )
+
+    #         st.session_state["selected_n_components"] = selected_n_components
+
+    #     with col2:
+    #         weibull_param_fit_method = st.selectbox(
+    #             "TTP方向のパラメータ補完方法",
+    #             options=[
+    #                 "3次スプライン補完",
+    #                 "3次多項式"
+    #             ],
+    #             index=[
+    #                 "3次スプライン補完",
+    #                 "3次多項式"
+    #             ].index(
+    #                 st.session_state.get(
+    #                     "weibull_param_fit_method",
+    #                     "3次スプライン補完"
+    #                 )
+    #             )
+    #         )
+
+    #         st.session_state["weibull_param_fit_method"] = weibull_param_fit_method
+
+    #     st.info(
+    #         f"選択中: {model_type} / "
+    #         f"{selected_n_components}項 / "
+    #         f"TTP方向: {weibull_param_fit_method} / "
+    #     )
 
 
     elif model_type == "2次元スプライン補完":
@@ -456,111 +651,455 @@ with tab_fit:
                 # =========================
                 # 混合ワイブルモデル
                 # =========================
+
                 if model_type == "混合ワイブルモデル":
+
+                    analysis_mode = st.session_state.get(
+                        "analysis_mode",
+                        "TTP dependent"
+                    )
 
                     n_components = st.session_state["selected_n_components"]
 
-                    df_fit = fit_by_throughput_percentile(
-                        df_long,
-                        n_components=n_components,
-                    )
-
-                    df_fit_results_dict = {
-                        n_components: df_fit
+                    method_map = {
+                        "3次スプライン補完": "spline",
+                        "3次多項式": "poly3"
                     }
 
-                    st.session_state["df_fit_results_dict"] = df_fit_results_dict
+                    method_ui = st.session_state["weibull_param_fit_method"]
+                    param_fit_method = method_map[method_ui]
 
-                    if df_fit.empty:
-                        st.session_state["global_cdf"] = None
+                    # =========================
+                    # TTP dependent
+                    # =========================
 
-                        st.warning(
-                            f"混合ワイブルモデル {n_components}成分のフィッティング結果がありません。"
+                    if analysis_mode == "TTP dependent":
+
+                        df_fit = fit_by_throughput_percentile(
+                            df_long,
+                            n_components=n_components
                         )
+
+                        df_fit_results_dict = {
+                            n_components: df_fit
+                        }
+
+                        st.session_state["df_fit_results_dict"] = df_fit_results_dict
+
+                        if df_fit.empty:
+                            st.session_state["global_cdf"] = None
+                            st.session_state["df_weibull_param_coefficients"] = None
+
+                            st.warning(
+                                f"混合ワイブルモデル {n_components}成分のフィッティング結果がありません。"
+                            )
+
+                        else:
+                            global_cdf = build_global_mixture_weibull_cdf(
+                                df_fit_results_dict,
+                                n_components=n_components,
+                                q_col="TTP_Percentile",
+                                param_fit_method=param_fit_method
+                            )
+
+                            st.session_state["global_cdf"] = global_cdf
+
+                            df_coef = make_weibull_param_coefficients(
+                                df_fit=df_fit,
+                                n_components=n_components,
+                                q_col="TTP_Percentile",
+                                method=param_fit_method
+                            )
+
+                            st.session_state["df_weibull_param_coefficients"] = df_coef
+
+                            fig_param = plot_weibull_parameter_trends(
+                                df_fit=df_fit,
+                                n_components=n_components,
+                                q_col="TTP_Percentile",
+                                param_fit_method=param_fit_method
+                            )
+
+                            st.session_state["fig_weibull_param_trends"] = fig_param
+
+                            st.success(
+                                f"混合ワイブルモデル {n_components}成分のフィッティングとGlobal model作成が完了しました。"
+                            )
+
+                    # =========================
+                    # Independent
+                    # =========================
 
                     else:
-                        method_ui = st.session_state["weibull_param_fit_method"]
 
-                        # ==================================
-                        # ワイブルパラメータ係数出力
-                        # ==================================
+                        df_fit = fit_independent_mixture_weibull(
+                            df_long,
+                            n_components=n_components,
+                            p_col="value_Percentile",
+                            value_col="value"
+                        )
 
-                        method_map = {
-                            "3次スプライン補完": "spline",
-                            "3次多項式": "poly3"
+                        df_fit_results_dict = {
+                            n_components: df_fit
                         }
 
-                        param_fit_method = method_map[method_ui]
+                        st.session_state["df_fit_results_dict"] = df_fit_results_dict
 
-                        global_cdf = build_global_mixture_weibull_cdf(
-                            df_fit_results_dict,
-                            n_components=n_components,
-                            q_col="TTP_Percentile",
-                            param_fit_method=param_fit_method
-                        )
-                        st.session_state["global_cdf"] = global_cdf
+                        if df_fit.empty:
+                            st.session_state["global_cdf"] = None
+                            st.session_state["df_weibull_param_coefficients"] = None
 
-                        df_coef = make_weibull_param_coefficients(
-                            df_fit=df_fit,
-                            n_components=n_components,
-                            q_col="TTP_Percentile",
-                            method=param_fit_method
-                        )
+                            st.warning(
+                                f"Independent 混合ワイブルモデル {n_components}成分のフィッティング結果がありません。"
+                            )
 
-                        st.session_state["df_weibull_param_coefficients"] = df_coef
+                        else:
+                            global_cdf = build_independent_mixture_weibull_cdf(
+                                df_fit=df_fit,
+                                n_components=n_components
+                            )
 
-                        method_map = {
-                            "3次スプライン補完": "spline",
-                            "3次多項式": "poly3"
-                        }
+                            st.session_state["global_cdf"] = global_cdf
 
-                        param_fit_method = method_map[
-                            st.session_state["weibull_param_fit_method"]
-                        ]
+                            # IndependentではTTP方向の係数・パラメータ推移は作らない
+                            st.session_state["df_weibull_param_coefficients"] = None
+                            st.session_state["fig_weibull_param_trends"] = None
 
-                        fig_param = plot_weibull_parameter_trends(
-                            df_fit=df_fit,
-                            n_components=n_components,
-                            q_col="TTP_Percentile",
-                            param_fit_method=method_map[st.session_state["weibull_param_fit_method"]]
-                        )
-                        st.session_state["df_weibull_param_coefficients"] = df_coef
+                            st.success(
+                                f"Independent 混合ワイブルモデル {n_components}成分のフィッティングが完了しました。"
+                            )
 
-                        st.success(
-                            f"混合ワイブルモデル {n_components}成分のフィッティングとGlobal model作成が完了しました。"
-                        )
+                
 
                 # =========================
                 # 混合正規分布モデル
                 # =========================
+
                 elif model_type == "混合正規分布モデル":
+
+                    analysis_mode = st.session_state.get(
+                        "analysis_mode",
+                        "TTP dependent"
+                    )
 
                     n_components = st.session_state["selected_n_components"]
 
-                    # TODO: 混合正規分布モデル関数を接続
-                    # df_fit = fit_gaussian_mixture_by_throughput_percentile(
-                    #     df_long,
-                    #     n_components=n_components
-                    # )
-                    #
-                    # df_fit_results_dict = {
-                    #     n_components: df_fit
-                    # }
-                    #
-                    # global_cdf = build_global_gaussian_mixture_cdf(
-                    #     df_fit_results_dict,
-                    #     n_components=n_components
-                    # )
-
-                    df_fit = pd.DataFrame()
-                    df_fit_results_dict = {
-                        n_components: df_fit
+                    method_map = {
+                        "3次スプライン補完": "spline",
+                        "3次多項式": "poly3"
                     }
 
-                    st.session_state["df_fit_results_dict"] = df_fit_results_dict
-                    st.session_state["global_cdf"] = None
+                    method_ui = st.session_state.get(
+                        "param_fit_method_ui",
+                        st.session_state.get(
+                            "weibull_param_fit_method",
+                            "3次スプライン補完"
+                        )
+                    )
 
-                    st.info("混合正規分布モデルはまだ未実装です。")
+                    param_fit_method = method_map[method_ui]
+
+                    if analysis_mode == "TTP dependent":
+
+                        df_fit = fit_gaussian_by_throughput_percentile(
+                            df_long,
+                            n_components=n_components
+                        )
+
+                        df_fit_results_dict = {
+                            n_components: df_fit
+                        }
+
+                        st.session_state["df_fit_results_dict"] = df_fit_results_dict
+
+                        if df_fit.empty:
+                            st.session_state["global_cdf"] = None
+                            st.session_state["df_param_coefficients"] = None
+                            st.session_state["fig_param_trends"] = None
+
+                            st.warning(
+                                f"混合正規分布モデル {n_components}成分のフィッティング結果がありません。"
+                            )
+
+                        else:
+                            global_cdf = build_global_mixture_gaussian_cdf(
+                                df_fit_results_dict=df_fit_results_dict,
+                                n_components=n_components,
+                                q_col="TTP_Percentile",
+                                param_fit_method=param_fit_method
+                            )
+
+                            st.session_state["global_cdf"] = global_cdf
+
+                            df_coef = make_gaussian_param_coefficients(
+                                df_fit=df_fit,
+                                n_components=n_components,
+                                q_col="TTP_Percentile",
+                                method=param_fit_method
+                            )
+
+                            st.session_state["df_param_coefficients"] = df_coef
+                            st.session_state["df_weibull_param_coefficients"] = None
+
+                            fig_param = plot_gaussian_parameter_trends(
+                                df_fit=df_fit,
+                                n_components=n_components,
+                                q_col="TTP_Percentile",
+                                param_fit_method=param_fit_method
+                            )
+
+                            st.session_state["fig_param_trends"] = fig_param
+                            st.session_state["fig_weibull_param_trends"] = None
+
+                            st.success(
+                                f"混合正規分布モデル {n_components}成分のフィッティングとGlobal model作成が完了しました。"
+                            )
+
+                    else:
+
+                        df_fit = fit_independent_mixture_gaussian(
+                            df_long=df_long,
+                            n_components=n_components,
+                            p_col="value_Percentile",
+                            value_col="value"
+                        )
+
+                        df_fit_results_dict = {
+                            n_components: df_fit
+                        }
+
+                        st.session_state["df_fit_results_dict"] = df_fit_results_dict
+
+                        if df_fit.empty:
+                            st.session_state["global_cdf"] = None
+                            st.session_state["df_param_coefficients"] = None
+                            st.session_state["fig_param_trends"] = None
+
+                            st.warning(
+                                f"Independent 混合正規分布モデル {n_components}成分のフィッティング結果がありません。"
+                            )
+
+                        else:
+                            global_cdf = build_independent_mixture_gaussian_cdf(
+                                df_fit=df_fit,
+                                n_components=n_components
+                            )
+
+                            st.session_state["global_cdf"] = global_cdf
+
+                            st.session_state["df_param_coefficients"] = None
+                            st.session_state["df_weibull_param_coefficients"] = None
+                            st.session_state["fig_param_trends"] = None
+                            st.session_state["fig_weibull_param_trends"] = None
+
+                            st.success(
+                                f"Independent 混合正規分布モデル {n_components}成分のフィッティングが完了しました。"
+                            )
+
+                # elif model_type == "混合正規分布モデル":
+
+                #     analysis_mode = st.session_state.get(
+                #         "analysis_mode",
+                #         "TTP dependent"
+                #     )
+
+                #     n_components = st.session_state["selected_n_components"]
+
+                #     method_map = {
+                #         "3次スプライン補完": "spline",
+                #         "3次多項式": "poly3"
+                #     }
+
+                #     method_ui = st.session_state.get(
+                #         "param_fit_method_ui",
+                #         st.session_state.get(
+                #             "weibull_param_fit_method",
+                #             "3次スプライン補完"
+                #         )
+                #     )
+
+                #     param_fit_method = method_map[method_ui]
+
+                #     if analysis_mode == "TTP dependent":
+
+                #         df_fit = fit_gaussian_by_throughput_percentile(
+                #             df_long,
+                #             n_components=n_components
+                #         )
+
+                #         df_fit_results_dict = {
+                #             n_components: df_fit
+                #         }
+
+                #         st.session_state["df_fit_results_dict"] = df_fit_results_dict
+
+                #         if df_fit.empty:
+                #             st.session_state["global_cdf"] = None
+                #             st.session_state["df_param_coefficients"] = None
+                #             st.session_state["fig_param_trends"] = None
+
+                #             st.warning(
+                #                 f"混合正規分布モデル {n_components}成分のフィッティング結果がありません。"
+                #             )
+
+                #         else:
+                #             global_cdf = build_global_mixture_gaussian_cdf(
+                #                 df_fit_results_dict=df_fit_results_dict,
+                #                 n_components=n_components,
+                #                 q_col="TTP_Percentile",
+                #                 param_fit_method=param_fit_method
+                #             )
+
+                #             st.session_state["global_cdf"] = global_cdf
+
+                #             df_coef = make_gaussian_param_coefficients(
+                #                 df_fit=df_fit,
+                #                 n_components=n_components,
+                #                 q_col="TTP_Percentile",
+                #                 method=param_fit_method
+                #             )
+
+                #             st.session_state["df_param_coefficients"] = df_coef
+                #             st.session_state["df_weibull_param_coefficients"] = None
+
+                #             fig_param = plot_gaussian_parameter_trends(
+                #                 df_fit=df_fit,
+                #                 n_components=n_components,
+                #                 q_col="TTP_Percentile",
+                #                 param_fit_method=param_fit_method
+                #             )
+
+                #             st.session_state["fig_param_trends"] = fig_param
+                #             st.session_state["fig_weibull_param_trends"] = None
+
+                #             st.success(
+                #                 f"混合正規分布モデル {n_components}成分のフィッティングとGlobal model作成が完了しました。"
+                #             )
+
+                #     else:
+
+                #         df_fit = fit_independent_mixture_gaussian(
+                #             df_long=df_long,
+                #             n_components=n_components,
+                #             p_col="value_Percentile",
+                #             value_col="value"
+                #         )
+
+                #         df_fit_results_dict = {
+                #             n_components: df_fit
+                #         }
+
+                #         st.session_state["df_fit_results_dict"] = df_fit_results_dict
+
+                #         if df_fit.empty:
+                #             st.session_state["global_cdf"] = None
+                #             st.session_state["df_param_coefficients"] = None
+                #             st.session_state["fig_param_trends"] = None
+
+                #             st.warning(
+                #                 f"Independent 混合正規分布モデル {n_components}成分のフィッティング結果がありません。"
+                #             )
+
+                #         else:
+                #             global_cdf = build_independent_mixture_gaussian_cdf(
+                #                 df_fit=df_fit,
+                #                 n_components=n_components
+                #             )
+
+                #             st.session_state["global_cdf"] = global_cdf
+
+                #             st.session_state["df_param_coefficients"] = None
+                #             st.session_state["df_weibull_param_coefficients"] = None
+                #             st.session_state["fig_param_trends"] = None
+                #             st.session_state["fig_weibull_param_trends"] = None
+
+                #             st.success(
+                #                 f"Independent 混合正規分布モデル {n_components}成分のフィッティングが完了しました。"
+                #             )
+                # elif model_type == "混合正規分布モデル":
+
+                #     analysis_mode = st.session_state.get(
+                #         "analysis_mode",
+                #         "TTP dependent"
+                #     )
+
+                #     n_components = st.session_state["selected_n_components"]
+
+                #     method_map = {
+                #         "3次スプライン補完": "spline",
+                #         "3次多項式": "poly3"
+                #     }
+
+                #     method_ui = st.session_state["weibull_param_fit_method"]
+                #     param_fit_method = method_map[method_ui]
+
+                #     if analysis_mode == "TTP dependent":
+
+                #         df_fit = fit_gaussian_by_throughput_percentile(
+                #             df_long,
+                #             n_components=n_components
+                #         )
+
+                #         df_fit_results_dict = {
+                #             n_components: df_fit
+                #         }
+
+                #         st.session_state["df_fit_results_dict"] = df_fit_results_dict
+
+                #         if df_fit.empty:
+                #             st.session_state["global_cdf"] = None
+
+                #             st.warning(
+                #                 f"混合正規分布モデル {n_components}成分のフィッティング結果がありません。"
+                #             )
+
+                #         else:
+                #             global_cdf = build_global_mixture_gaussian_cdf(
+                #                 df_fit_results_dict=df_fit_results_dict,
+                #                 n_components=n_components,
+                #                 q_col="TTP_Percentile",
+                #                 param_fit_method=param_fit_method
+                #             )
+
+                #             st.session_state["global_cdf"] = global_cdf
+
+                #             st.success(
+                #                 f"混合正規分布モデル {n_components}成分のフィッティングとGlobal model作成が完了しました。"
+                #             )
+
+                #     else:
+
+                #         df_fit = fit_independent_mixture_gaussian(
+                #             df_long=df_long,
+                #             n_components=n_components,
+                #             p_col="value_Percentile",
+                #             value_col="value"
+                #         )
+
+                #         df_fit_results_dict = {
+                #             n_components: df_fit
+                #         }
+
+                #         st.session_state["df_fit_results_dict"] = df_fit_results_dict
+
+                #         if df_fit.empty:
+                #             st.session_state["global_cdf"] = None
+
+                #             st.warning(
+                #                 f"Independent 混合正規分布モデル {n_components}成分のフィッティング結果がありません。"
+                #             )
+
+                #         else:
+                #             global_cdf = build_independent_mixture_gaussian_cdf(
+                #                 df_fit=df_fit,
+                #                 n_components=n_components
+                #             )
+
+                #             st.session_state["global_cdf"] = global_cdf
+
+                #             st.success(
+                #                 f"Independent 混合正規分布モデル {n_components}成分のフィッティングが完了しました。"
+                #             )
 
                 # =========================
                 # 2次元スプライン補完
@@ -588,6 +1127,7 @@ with tab_fit:
     # =========================
 
     st.subheader("Fit results")
+
     if st.session_state["df_fit_results_dict"]:
         for n, df_fit in st.session_state["df_fit_results_dict"].items():
             with st.expander(f"{n} component fit result"):
@@ -599,55 +1139,151 @@ with tab_fit:
         st.info("No fitting result yet.")
 
     
-    st.subheader("Weibull parameter coefficients")
+    st.subheader("Parameter coefficients")
 
-    df_coef = st.session_state.get("df_weibull_param_coefficients")
+    model_type = st.session_state.get("model_type")
+
+    if model_type == "混合ワイブルモデル":
+        df_coef = st.session_state.get("df_weibull_param_coefficients")
+    else:
+        df_coef = st.session_state.get("df_param_coefficients")
 
     if df_coef is not None and not df_coef.empty:
-
         st.dataframe(
             df_coef,
             use_container_width=True
         )
-
     else:
-        st.info("No Weibull parameter coefficient result yet.")
+        st.info("No parameter coefficient result yet.")
+
+    
+    # st.subheader("Weibull parameter coefficients")
+
+    # df_coef = st.session_state.get("df_weibull_param_coefficients")
+
+    # if df_coef is not None and not df_coef.empty:
+
+    #     st.dataframe(
+    #         df_coef,
+    #         use_container_width=True
+    #     )
+
+    # else:
+    #     st.info("No Weibull parameter coefficient result yet.")
 
 
-    st.subheader("Weibull parameter trends")
-    if st.session_state["df_fit_results_dict"]:
+    st.subheader("Parameter trends")
+
+    analysis_mode = st.session_state.get("analysis_mode", "TTP dependent")
+    model_type = st.session_state.get("model_type")
+
+    if analysis_mode != "TTP dependent":
+        st.info("Independent modeではTTP方向のパラメータ推移は表示しません。")
+
+    elif st.session_state["df_fit_results_dict"]:
 
         n_components = st.session_state["selected_n_components"]
-
         df_fit = st.session_state["df_fit_results_dict"].get(n_components)
 
         if df_fit is not None and not df_fit.empty:
 
-            method_map = {
-                "3次スプライン補完": "spline",
-                "3次多項式": "poly3"
-            }
+            if "TTP_Percentile" not in df_fit.columns:
+                st.info("TTP_Percentile列がないため、パラメータ推移は表示しません。")
 
-            fig_param = plot_weibull_parameter_trends(
-                df_fit=df_fit,
-                n_components=n_components,
-                q_col="TTP_Percentile",
-                param_fit_method=method_map[st.session_state["weibull_param_fit_method"]]
-            )
-
-            if fig_param is not None:
-                st.plotly_chart(
-                    fig_param,
-                    use_container_width=True
-                )
             else:
-                st.info("No parameter trend plot available.")
+                method_map = {
+                    "3次スプライン補完": "spline",
+                    "3次多項式": "poly3"
+                }
+
+                method_ui = st.session_state.get(
+                    "param_fit_method_ui",
+                    st.session_state.get(
+                        "weibull_param_fit_method",
+                        "3次スプライン補完"
+                    )
+                )
+
+                param_fit_method = method_map[method_ui]
+
+                if model_type == "混合ワイブルモデル":
+                    fig_param = plot_weibull_parameter_trends(
+                        df_fit=df_fit,
+                        n_components=n_components,
+                        q_col="TTP_Percentile",
+                        param_fit_method=param_fit_method
+                    )
+
+                elif model_type == "混合正規分布モデル":
+                    fig_param = plot_gaussian_parameter_trends(
+                        df_fit=df_fit,
+                        n_components=n_components,
+                        q_col="TTP_Percentile",
+                        param_fit_method=param_fit_method
+                    )
+
+                else:
+                    fig_param = None
+
+                if fig_param is not None:
+                    st.plotly_chart(
+                        fig_param,
+                        use_container_width=True
+                    )
+                else:
+                    st.info("No parameter trend plot available.")
 
         else:
             st.info("No fit result for selected component.")
 
     else:
         st.info("No fitting result yet.")
+    
+
+    # st.subheader("Weibull parameter trends")
+
+    # analysis_mode = st.session_state.get("analysis_mode", "TTP dependent")
+
+    # if analysis_mode != "TTP dependent":
+    #     st.info("Independent modeではTTP方向のパラメータ推移は表示しません。")
+
+    # elif st.session_state["df_fit_results_dict"]:
+
+    #     n_components = st.session_state["selected_n_components"]
+    #     df_fit = st.session_state["df_fit_results_dict"].get(n_components)
+
+    #     if df_fit is not None and not df_fit.empty:
+
+    #         if "TTP_Percentile" not in df_fit.columns:
+    #             st.info("TTP_Percentile列がないため、パラメータ推移は表示しません。")
+
+    #         else:
+    #             method_map = {
+    #                 "3次スプライン補完": "spline",
+    #                 "3次多項式": "poly3"
+    #             }
+
+    #             param_fit_method = method_map[
+    #                 st.session_state["weibull_param_fit_method"]
+    #             ]
+
+    #             fig_param = plot_weibull_parameter_trends(
+    #                 df_fit=df_fit,
+    #                 n_components=n_components,
+    #                 q_col="TTP_Percentile",
+    #                 param_fit_method=param_fit_method
+    #             )
+
+    #             if fig_param is not None:
+    #                 st.plotly_chart(fig_param, use_container_width=True)
+    #             else:
+    #                 st.info("No parameter trend plot available.")
+
+    #     else:
+    #         st.info("No fit result for selected component.")
+
+    # else:
+    #     st.info("No fitting result yet.")
 
 
 # =========================
@@ -658,6 +1294,7 @@ with tab_sample:
     st.header("4. Random Sampling")
 
     selected_feature = st.session_state.get("selected_feature", "value")
+    analysis_mode = st.session_state.get("analysis_mode", "TTP dependent")
 
     # =========================
     # Sampling settings
@@ -696,6 +1333,8 @@ with tab_sample:
     st.session_state["random_state"] = random_state
     st.session_state["use_quantile_correction"] = use_quantile_correction
 
+    st.info(f"Analysis mode: {analysis_mode}")
+
     st.divider()
 
     # =========================
@@ -705,37 +1344,66 @@ with tab_sample:
     if st.session_state["global_cdf"] is None:
         st.info("Please run fitting first.")
 
-    elif st.session_state["df_throughput_quantile"] is None:
+    elif (
+        analysis_mode == "TTP dependent"
+        and st.session_state["df_throughput_quantile"] is None
+    ):
         st.info("Please load Total Throughput quantile data first.")
 
     else:
         if st.button("Generate random samples", key="generate_random_samples"):
             try:
-                sampler = build_bivariate_sampler(
-                    df_throughput_quantile=st.session_state["df_throughput_quantile"],
-                    global_cdf=st.session_state["global_cdf"],
-                    q_col="TTP_Percentile",
-                    throughput_col="TTP"
-                )
+                # =========================
+                # Sampling
+                # =========================
 
-                df_sample = sampler(
-                    n_samples=st.session_state["n_samples"],
-                    random_state=st.session_state["random_state"]
-                )
+                if analysis_mode == "TTP dependent":
+                    sampler = build_bivariate_sampler(
+                        df_throughput_quantile=st.session_state["df_throughput_quantile"],
+                        global_cdf=st.session_state["global_cdf"],
+                        q_col="TTP_Percentile",
+                        throughput_col="TTP"
+                    )
+
+                    df_sample = sampler(
+                        n_samples=st.session_state["n_samples"],
+                        random_state=st.session_state["random_state"]
+                    )
+
+                else:
+                    sampler = build_independent_sampler(
+                        global_cdf=st.session_state["global_cdf"]
+                    )
+
+                    df_sample = sampler(
+                        n_samples=st.session_state["n_samples"],
+                        random_state=st.session_state["random_state"]
+                    )
 
                 # =========================
                 # Quantile correction
                 # =========================
 
                 if st.session_state["use_quantile_correction"]:
-                    df_sample = apply_quantile_correction(
-                        df_sample=df_sample,
-                        df_reference=st.session_state["df_long"],
-                        global_cdf=st.session_state["global_cdf"],
-                        q_col="TTP_Percentile",
-                        p_col="value_Percentile",
-                        value_col="value"
-                    )
+
+                    if analysis_mode == "TTP dependent":
+                        df_sample = apply_quantile_correction(
+                            df_sample=df_sample,
+                            df_reference=st.session_state["df_long"],
+                            global_cdf=st.session_state["global_cdf"],
+                            q_col="TTP_Percentile",
+                            p_col="value_Percentile",
+                            value_col="value"
+                        )
+
+                    else:
+                        df_sample = apply_independent_quantile_correction(
+                            df_sample=df_sample,
+                            df_reference=st.session_state["df_long"],
+                            global_cdf=st.session_state["global_cdf"],
+                            p_col="value_Percentile",
+                            value_col="value"
+                        )
 
                 st.session_state["df_sample"] = df_sample
 
@@ -747,7 +1415,7 @@ with tab_sample:
 
             except Exception as e:
                 st.error(f"Failed to generate random samples: {e}")
-        
+
         # =========================
         # Visualization
         # =========================
@@ -761,148 +1429,221 @@ with tab_sample:
 
                 value_min = float(df_sample["value"].min())
                 value_max = float(df_sample["value"].max())
-                ttp_min = float(df_sample["TTP"].min())
-                ttp_max = float(df_sample["TTP"].max())
 
                 # =========================
-                # Histogram
+                # Distribution overlay
                 # =========================
 
-                st.markdown("### Histogram")
+                st.subheader("Distribution overlay")
 
-                col_hist_setting, col_hist_plot = st.columns([1, 3])
+                analysis_mode = st.session_state.get(
+                    "analysis_mode",
+                    "TTP dependent"
+                )
 
-                with col_hist_setting:
-                    # st.markdown("#### Histogram settings")
+                target_ttp = None
 
-                    hist_x_min = st.number_input(
-                        "Hist X min",
-                        value=value_min,
-                        key="hist_x_min"
-                    )
+                if analysis_mode == "TTP dependent":
 
-                    hist_x_max = st.number_input(
-                        "Hist X max",
-                        value=value_max,
-                        key="hist_x_max"
-                    )
-
-                    hist_y_min = st.number_input(
-                        "Hist Y min",
-                        value=0.0,
-                        key="hist_y_min"
-                    )
-
-                    hist_y_max = st.number_input(
-                        "Hist Y max",
-                        value=float(len(df_sample)),
-                        key="hist_y_max"
-                    )
-
-                    hist_bin_width = st.number_input(
-                        "Bin width",
-                        min_value=1e-12,
-                        value=(value_max - value_min) / 50,
-                        key="hist_bin_width"
-                    )
-
-                with col_hist_plot:
-                    fig_hist = px.histogram(
-                        df_sample,
-                        x="value",
-                        nbins=None
-                    )
-
-                    fig_hist.update_traces(
-                        xbins=dict(
-                            start=hist_x_min,
-                            end=hist_x_max,
-                            size=hist_bin_width
+                    if "TTP_Percentile" in df_long.columns:
+                        ttp_options = sorted(
+                            df_long["TTP_Percentile"].dropna().unique()
                         )
+
+                        target_ttp = st.selectbox(
+                            "TTP_Percentile for overlay plot",
+                            options=ttp_options,
+                            index=0,
+                            key="valid_overlay_target_ttp"
+                        )
+                    else:
+                        st.warning("df_longにTTP_Percentile列がありません。")
+
+                overlay_bins = st.number_input(
+                    "Overlay histogram bins",
+                    min_value=5,
+                    max_value=300,
+                    value=50,
+                    step=5,
+                    key="valid_overlay_bins"
+                )
+
+                try:
+                    fig_overlay = plot_sample_distribution_overlay(
+                        df_sample=df_sample,
+                        df_reference=df_long,
+                        selected_feature=selected_feature,
+                        value_col="value",
+                        p_col="value_Percentile",
+                        q_col="TTP_Percentile",
+                        analysis_mode=analysis_mode,
+                        target_ttp=target_ttp,
+                        bins=overlay_bins
                     )
 
-                    fig_hist.update_layout(
-                        height=500,
-                        xaxis_title=selected_feature,
-                        yaxis_title="Count",
-                        showlegend=False
-                    )
+                    if fig_overlay is not None:
+                        st.plotly_chart(
+                            fig_overlay,
+                            use_container_width=True
+                        )
+                    else:
+                        st.info("No distribution overlay available.")
 
-                    fig_hist.update_xaxes(
-                        range=[hist_x_min, hist_x_max]
-                    )
+                except Exception as e:
+                    st.error(f"Failed to plot distribution overlay: {e}")
 
-                    fig_hist.update_yaxes(
-                        range=[hist_y_min, hist_y_max]
-                    )
+                # # =========================
+                # # Histogram
+                # # =========================
 
-                    st.plotly_chart(
-                        fig_hist,
-                        use_container_width=True
-                    )
+                # st.markdown("### Histogram")
+
+                # col_hist_setting, col_hist_plot = st.columns([1, 3])
+
+                # with col_hist_setting:
+                #     hist_x_min = st.number_input(
+                #         "Hist X min",
+                #         value=value_min,
+                #         key="hist_x_min"
+                #     )
+
+                #     hist_x_max = st.number_input(
+                #         "Hist X max",
+                #         value=value_max,
+                #         key="hist_x_max"
+                #     )
+
+                #     hist_y_min = st.number_input(
+                #         "Hist Y min",
+                #         value=0.0,
+                #         key="hist_y_min"
+                #     )
+
+                #     hist_y_max = st.number_input(
+                #         "Hist Y max",
+                #         value=float(len(df_sample)),
+                #         key="hist_y_max"
+                #     )
+
+                #     default_bin_width = (value_max - value_min) / 50
+
+                #     if default_bin_width <= 0:
+                #         default_bin_width = 1.0
+
+                #     hist_bin_width = st.number_input(
+                #         "Bin width",
+                #         min_value=1e-12,
+                #         value=float(default_bin_width),
+                #         key="hist_bin_width"
+                #     )
+
+                # with col_hist_plot:
+                #     fig_hist = px.histogram(
+                #         df_sample,
+                #         x="value",
+                #         nbins=None
+                #     )
+
+                #     fig_hist.update_traces(
+                #         xbins=dict(
+                #             start=hist_x_min,
+                #             end=hist_x_max,
+                #             size=hist_bin_width
+                #         )
+                #     )
+
+                #     fig_hist.update_layout(
+                #         height=500,
+                #         xaxis_title=selected_feature,
+                #         yaxis_title="Count",
+                #         showlegend=False
+                #     )
+
+                #     fig_hist.update_xaxes(
+                #         range=[hist_x_min, hist_x_max]
+                #     )
+
+                #     fig_hist.update_yaxes(
+                #         range=[hist_y_min, hist_y_max]
+                #     )
+
+                #     st.plotly_chart(
+                #         fig_hist,
+                #         use_container_width=True
+                #     )
 
                 # =========================
                 # Scatter
                 # =========================
 
-                st.markdown("### Scatter plot")
+                if analysis_mode == "TTP dependent" and "TTP" in df_sample.columns:
 
-                col_scatter_setting, col_scatter_plot = st.columns([1, 3])
+                    st.markdown("### Scatter plot")
 
-                with col_scatter_setting:
-                    # st.markdown("#### Scatter settings")
+                    ttp_min = float(df_sample["TTP"].min())
+                    ttp_max = float(df_sample["TTP"].max())
 
-                    scatter_x_min = st.number_input(
-                        "Scatter X min",
-                        value=ttp_min,
-                        key="scatter_x_min"
-                    )
+                    col_scatter_setting, col_scatter_plot = st.columns([1, 3])
 
-                    scatter_x_max = st.number_input(
-                        "Scatter X max",
-                        value=ttp_max,
-                        key="scatter_x_max"
-                    )
+                    with col_scatter_setting:
+                        scatter_x_min = st.number_input(
+                            "Scatter X min",
+                            value=ttp_min,
+                            key="scatter_x_min"
+                        )
 
-                    scatter_y_min = st.number_input(
-                        "Scatter Y min",
-                        value=value_min,
-                        key="scatter_y_min"
-                    )
+                        scatter_x_max = st.number_input(
+                            "Scatter X max",
+                            value=ttp_max,
+                            key="scatter_x_max"
+                        )
 
-                    scatter_y_max = st.number_input(
-                        "Scatter Y max",
-                        value=value_max,
-                        key="scatter_y_max"
-                    )
+                        scatter_y_min = st.number_input(
+                            "Scatter Y min",
+                            value=value_min,
+                            key="scatter_y_min"
+                        )
 
-                with col_scatter_plot:
-                    fig_scatter = px.scatter(
-                        df_sample,
-                        x="TTP",
-                        y="value",
-                        opacity=0.35
-                    )
+                        scatter_y_max = st.number_input(
+                            "Scatter Y max",
+                            value=value_max,
+                            key="scatter_y_max"
+                        )
 
-                    fig_scatter.update_layout(
-                        height=500,
-                        xaxis_title="Total Throughput",
-                        yaxis_title=selected_feature,
-                        showlegend=False
-                    )
+                    with col_scatter_plot:
+                        fig_scatter = px.scatter(
+                            df_sample,
+                            x="TTP",
+                            y="value",
+                            opacity=0.35
+                        )
 
-                    fig_scatter.update_xaxes(
-                        range=[scatter_x_min, scatter_x_max]
-                    )
+                        fig_scatter.update_layout(
+                            height=500,
+                            xaxis_title="Total Throughput",
+                            yaxis_title=selected_feature,
+                            showlegend=False
+                        )
 
-                    fig_scatter.update_yaxes(
-                        range=[scatter_y_min, scatter_y_max]
-                    )
+                        fig_scatter.update_xaxes(
+                            range=[scatter_x_min, scatter_x_max]
+                        )
 
-                    st.plotly_chart(
-                        fig_scatter,
-                        use_container_width=True
-                    )
+                        fig_scatter.update_yaxes(
+                            range=[scatter_y_min, scatter_y_max]
+                        )
+
+                        st.plotly_chart(
+                            fig_scatter,
+                            use_container_width=True
+                        )
+
+                else:
+                    st.info("Independent modeでは散布図は表示しません。")
+
+                # =========================
+                # Summary
+                # =========================
 
                 st.subheader("Generated sample summary")
 
@@ -917,11 +1658,13 @@ with tab_sample:
 # =========================
 
 with tab_valid:
+
     st.header("5. Validation")
 
     df_long = st.session_state["df_long"]
     df_sample = st.session_state["df_sample"]
     selected_feature = st.session_state.get("selected_feature", "value")
+    analysis_mode = st.session_state.get("analysis_mode", "TTP dependent")
 
     if df_long is None:
         st.info("Please load data first.")
@@ -931,6 +1674,8 @@ with tab_valid:
 
     else:
         st.subheader("Validation settings")
+
+        st.info(f"Analysis mode: {analysis_mode}")
 
         target_percentiles = [
             0.01, 0.25, 0.50, 0.75,
@@ -944,26 +1689,71 @@ with tab_valid:
 
         if run_validation:
             try:
-                df_qq = make_qq_table_by_ttp(
-                    df_long=df_long,
-                    df_sample=df_sample,
-                    percentiles=target_percentiles,
-                    q_col="TTP_Percentile",
-                    p_col="value_Percentile",
-                    value_col="value",
-                    ttp_bin_width=2.5
-                )
+                if analysis_mode == "TTP dependent":
+                    df_qq = make_qq_table_by_ttp(
+                        df_long=df_long,
+                        df_sample=df_sample,
+                        percentiles=target_percentiles,
+                        q_col="TTP_Percentile",
+                        p_col="value_Percentile",
+                        value_col="value",
+                        ttp_bin_width=2.5
+                    )
+
+                else:
+                    df_qq = make_independent_qq_table(
+                        df_long=df_long,
+                        df_sample=df_sample,
+                        percentiles=target_percentiles,
+                        p_col="value_Percentile",
+                        value_col="value"
+                    )
 
                 st.session_state["df_validation"] = df_qq
 
-                if df_qq.empty:
-                    st.warning("Q-Q table is empty. Check TTP_Percentile and value_Percentile values.")
+                df_metrics = make_validation_metrics_from_qq(df_qq)
+                st.session_state["df_validation_metrics"] = df_metrics
+
+                if df_qq is None or df_qq.empty:
+                    st.warning(
+                        "Q-Q table is empty. Check input data and percentile values."
+                    )
                 else:
                     st.success("Validation completed.")
 
             except Exception as e:
+                st.session_state["df_validation"] = None
+                st.session_state["df_validation_metrics"] = None
                 st.error(f"Validation failed: {e}")
 
+        st.divider()
+
+        # =========================
+        # Metrucs
+        # =========================
+
+        st.subheader("Validation metrics")
+
+        df_metrics = st.session_state.get("df_validation_metrics")
+
+        if df_metrics is not None and not df_metrics.empty:
+            st.dataframe(
+                df_metrics,
+                use_container_width=True
+            )
+
+            r2_value = df_metrics.loc[
+                df_metrics["Metric"] == "R2",
+                "Value"
+            ].iloc[0]
+
+            st.metric(
+                label="R²",
+                value=f"{r2_value:.4f}"
+            )
+        else:
+            st.info("No validation metrics yet.")
+        
         st.divider()
 
         # =========================
@@ -976,13 +1766,20 @@ with tab_valid:
 
         if df_qq is not None and not df_qq.empty:
             try:
-                fig_qq = plot_qq_by_ttp_grid(
-                    df_qq=df_qq,
-                    selected_feature=selected_feature,
-                    q_col="TTP_Percentile",
-                    p_col="value_Percentile",
-                    n_cols=4
-                )
+                if analysis_mode == "TTP dependent":
+                    fig_qq = plot_qq_by_ttp_grid(
+                        df_qq=df_qq,
+                        selected_feature=selected_feature,
+                        q_col="TTP_Percentile",
+                        p_col="value_Percentile",
+                        n_cols=4
+                    )
+
+                else:
+                    fig_qq = plot_independent_qq(
+                        df_qq=df_qq,
+                        selected_feature=selected_feature
+                    )
 
                 if fig_qq is not None:
                     st.plotly_chart(

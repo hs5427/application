@@ -94,3 +94,39 @@ def build_bivariate_sampler(
         return df_sample
 
     return sample
+
+
+def build_independent_sampler(
+    global_cdf
+):
+    def sample(
+        n_samples=10000,
+        random_state=42
+    ):
+        rng = np.random.default_rng(random_state)
+
+        u_values = rng.uniform(
+            1e-10,
+            1 - 1e-10,
+            size=n_samples
+        )
+
+        values = []
+
+        for u in u_values:
+            x = global_cdf_ppf(
+                global_cdf=global_cdf,
+                p=u,
+                q=None,
+                x_max_init=1.0
+            )
+
+            values.append(x)
+
+        df_sample = pd.DataFrame({
+            "value": values
+        })
+
+        return df_sample
+
+    return sample
