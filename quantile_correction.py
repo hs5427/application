@@ -80,19 +80,7 @@ def apply_independent_quantile_correction(
     p_col="value_Percentile",
     value_col="value"
 ):
-    """
-    Independent mode用の分位点補正。
 
-    df_reference:
-        value_Percentile | value
-
-    df_sample:
-        value
-
-    処理:
-        1. 補正前value xをモデルCDFでuに変換
-        2. 元データ側のPPF_ref(u)で補正値に変換
-    """
 
     df_sample = df_sample.copy()
     df_ref = df_reference[[p_col, value_col]].dropna().copy()

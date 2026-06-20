@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
-
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from scipy.optimize import least_squares
 from scipy.special import erf
 from scipy.interpolate import CubicSpline
@@ -28,13 +29,6 @@ def softmax(z):
 # =========================
 
 def mixture_gaussian_cdf(x, params, n_components):
-    """
-    params:
-        [mu1, log_sigma1,
-         mu2, log_sigma2,
-         ...,
-         z_weight1, z_weight2, ...]
-    """
 
     x = np.asarray(x, dtype=float)
 
@@ -161,9 +155,16 @@ def fit_mixture_gaussian(df_group, n_components=2):
 
     p_obs = np.clip(p_obs, 1e-6, 1 - 1e-6)
 
-    # mu, sigma, weight で合計 3K パラメータ
-    if len(x) < 3 * n_components:
-        return None
+    # # mu, sigma, weight で合計 3K パラメータ
+    # if len(x) < 3 * n_components:
+    #     return None
+
+    n_params_effective = 3 * n_components - 1
+
+    if len(x) < n_params_effective:
+        use_regularization = True
+    else:
+        use_regularization = False
 
     init_params = make_initial_params(
         x,
@@ -175,13 +176,30 @@ def fit_mixture_gaussian(df_group, n_components=2):
         n_components
     )
 
-    result = least_squares(
-        residuals,
-        x0=init_params,
-        args=(x, p_obs, n_components),
-        bounds=bounds,
-        max_nfev=20000
-    )
+    # result = least_squares(
+    #     residuals,
+    #     x0=init_params,
+    #     args=(x, p_obs, n_components),
+    #     bounds=bounds,
+    #     max_nfev=20000
+    # )
+
+    if use_regularization:
+        result = least_squares(
+            residuals_regularized_gaussian,
+            x0=init_params,
+            args=(x, p_obs, n_components),
+            bounds=bounds,
+            max_nfev=20000
+        )
+    else:
+        result = least_squares(
+            residuals,
+            x0=init_params,
+            args=(x, p_obs, n_components),
+            bounds=bounds,
+            max_nfev=20000
+        )
 
     params_hat = result.x
 
@@ -211,11 +229,13 @@ def fit_mixture_gaussian(df_group, n_components=2):
         r2 = 1 - sse / sst
 
     output = {
-        "n_components": n_components,
+        # "n_components": n_components,
         "rmse": rmse,
-        "r2": r2,
-        "success": result.success,
-        "message": result.message
+        "nfev": result.nfev,
+        # "r2": r2,
+        # "success": result.success,
+        # "message": result.message,
+        "n_params_effective": n_params_effective
     }
 
     for k in range(n_components):
@@ -236,7 +256,7 @@ def fit_gaussian_by_throughput_percentile(
 ):
     fit_results = []
 
-    for tp, df_group in df_long.groupby("TTP_Percentile"):
+    for ttp, df_group in df_long.groupby("TTP_Percentile"):
         try:
             fit = fit_mixture_gaussian(
                 df_group,
@@ -245,16 +265,16 @@ def fit_gaussian_by_throughput_percentile(
 
             if fit is None:
                 print(
-                    f"Skipped TTP_Percentile={tp}: insufficient data"
+                    f"Skipped TTP_Percentile={ttp}: insufficient data"
                 )
                 continue
 
-            fit["TTP_Percentile"] = tp
+            fit["TTP_Percentile"] = ttp
             fit_results.append(fit)
 
         except Exception as e:
             print(
-                f"Gaussian fitting failed at TTP_Percentile={tp}: {e}"
+                f"Gaussian fitting failed at TTP_Percentile={ttp}: {e}"
             )
             continue
 
@@ -474,10 +494,6 @@ def build_independent_mixture_gaussian_cdf(
     return global_cdf
 
 
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-
-
 def make_gaussian_param_coefficients(
     df_fit,
     n_components=2,
@@ -550,7 +566,8 @@ def plot_gaussian_parameter_trends(
     df_fit,
     n_components=2,
     q_col="TTP_Percentile",
-    param_fit_method="spline"
+    param_fit_method="spline",
+    n_grid=300
 ):
     """
     混合正規分布パラメータ mu, sigma, weight の
@@ -565,23 +582,18 @@ def plot_gaussian_parameter_trends(
 
     df_fit = df_fit.sort_values(q_col).copy()
 
-    q = df_fit[q_col].to_numpy(dtype=float)
-
-    q_grid = np.linspace(
-        float(np.min(q)),
-        float(np.max(q)),
-        300
-    )
+    q_values = df_fit[q_col].to_numpy(dtype=float)
+    q_grid = np.linspace(q_values.min(), q_values.max(), n_grid)
 
     fig = make_subplots(
-        rows=3,
-        cols=1,
+        rows=1,
+        cols=3,
         subplot_titles=[
             "mu trend",
             "sigma trend",
             "weight trend"
         ],
-        vertical_spacing=0.12
+        horizontal_spacing=0.08
     )
 
     param_specs = [
@@ -590,39 +602,43 @@ def plot_gaussian_parameter_trends(
         ("w", 3)
     ]
 
-    for param_prefix, row in param_specs:
+    for param_prefix, col_idx in param_specs:
 
         for k in range(1, n_components + 1):
 
-            col = f"{param_prefix}{k}"
+            param_col = f"{param_prefix}{k}"
 
-            if col not in df_fit.columns:
+            if param_col not in df_fit.columns:
                 continue
 
-            y = df_fit[col].to_numpy(dtype=float)
+            y_values = df_fit[param_col].to_numpy(dtype=float)
 
             fig.add_trace(
                 go.Scatter(
-                    x=q,
-                    y=y,
+                    x=q_values,
+                    y=y_values,
                     mode="markers",
-                    name=f"{col} data"
+                    name=f"{param_col} data"
                 ),
-                row=row,
-                col=1
+                row=1,
+                col=col_idx
             )
 
-            if len(q) >= 2:
+            if len(q_values) >= 2:
 
                 if param_fit_method == "poly3":
-                    degree = min(3, len(q) - 1)
-                    coef = np.polyfit(q, y, deg=degree)
+                    degree = min(3, len(q_values) - 1)
+                    coef = np.polyfit(
+                        q_values,
+                        y_values,
+                        deg=degree
+                    )
                     y_fit = np.polyval(coef, q_grid)
 
                 elif param_fit_method == "spline":
                     func = CubicSpline(
-                        q,
-                        y,
+                        q_values,
+                        y_values,
                         extrapolate=True
                     )
                     y_fit = func(q_grid)
@@ -637,28 +653,74 @@ def plot_gaussian_parameter_trends(
                         x=q_grid,
                         y=y_fit,
                         mode="lines",
-                        name=f"{col} {param_fit_method}"
+                        name=f"{param_col} {param_fit_method}"
                     ),
-                    row=row,
-                    col=1
+                    row=1,
+                    col=col_idx
                 )
 
         fig.update_yaxes(
             title_text=param_prefix,
-            row=row,
-            col=1
+            row=1,
+            col=col_idx
         )
 
-    fig.update_xaxes(
-        title_text="TTP_Percentile",
-        row=3,
-        col=1
-    )
+        fig.update_xaxes(
+            title_text="TTP_Percentile",
+            row=1,
+            col=col_idx
+        )
 
     fig.update_layout(
-        height=900,
+        height=500,
+        width=1500,
         title="Gaussian mixture parameter trends",
-        showlegend=True
+        showlegend=True,
+        legend_title="Parameter"
     )
 
     return fig
+
+
+def residuals_regularized_gaussian(
+    params,
+    x,
+    p_obs,
+    n_components,
+    lambda_mu=0.01,
+    lambda_sigma=0.01,
+    lambda_weight=0.01
+):
+    p_pred = mixture_gaussian_cdf(
+        x,
+        params,
+        n_components
+    )
+
+    data_resid = p_obs - p_pred
+
+    mu = params[0 : 2 * n_components : 2]
+    log_sigma = params[1 : 2 * n_components : 2]
+    z_weight = params[2 * n_components : 3 * n_components]
+
+    mu_center = np.mean(mu)
+    x_scale = np.std(x)
+
+    if not np.isfinite(x_scale) or x_scale <= 0:
+        x_scale = max(np.max(x) - np.min(x), 1.0)
+
+    mu_penalty = np.sqrt(lambda_mu) * (mu - mu_center) / x_scale
+
+    sigma_init = max(x_scale / max(n_components, 1), 1e-12)
+    sigma_penalty = np.sqrt(lambda_sigma) * (
+        log_sigma - np.log(sigma_init)
+    )
+
+    weight_penalty = np.sqrt(lambda_weight) * z_weight
+
+    return np.concatenate([
+        data_resid,
+        mu_penalty,
+        sigma_penalty,
+        weight_penalty
+    ])

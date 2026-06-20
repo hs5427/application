@@ -3,7 +3,6 @@ import numpy as np
 import plotly.express as px
 from scipy.optimize import least_squares
 import plotly.graph_objects as go
-from scipy.optimize import least_squares
 from plotly.subplots import make_subplots
 from scipy.optimize import brentq
 from scipy.interpolate import CubicSpline
@@ -126,7 +125,7 @@ def make_bounds(x, n_components):
 
 def fit_mixture_weibull(df_group, n_components=2):
 
-    df_group = df_group.sort_values("value").copy()
+    df_group = df_group.sort_values("value").copy()   # df_group: 任意のTTP_percentileにおけるパーセンタイルデータ
 
     x = df_group["value"].to_numpy(dtype=float)
     p_obs = df_group["value_Percentile"].to_numpy(dtype=float)
@@ -139,19 +138,43 @@ def fit_mixture_weibull(df_group, n_components=2):
     # 0,1は不安定なので丸める
     p_obs = np.clip(p_obs, 1e-6, 1 - 1e-6)
 
-    if len(x) < 2 * n_components + n_components:
-        return None
+    # if len(x) < 2 * n_components + n_components:
+    #     return None
+
+    # result = least_squares(
+    #     residuals,
+    #     x0=init_params,
+    #     args=(x, p_obs, n_components),
+    #     bounds=bounds,
+    #     max_nfev=20000
+    # )
+
+    n_params_effective = 3 * n_components - 1
+
+    if len(x) < n_params_effective:
+        use_regularization = True
+    else:
+        use_regularization = False
 
     init_params = make_initial_params(x, n_components)
     bounds = make_bounds(x, n_components)
 
-    result = least_squares(
-        residuals,
-        x0=init_params,
-        args=(x, p_obs, n_components),
-        bounds=bounds,
-        max_nfev=20000
-    )
+    if use_regularization:
+        result = least_squares(
+            residuals_regularized_weibull,
+            x0=init_params,
+            args=(x, p_obs, n_components),
+            bounds=bounds,
+            max_nfev=20000
+        )
+    else:
+        result = least_squares(
+            residuals,
+            x0=init_params,
+            args=(x, p_obs, n_components),
+            bounds=bounds,
+            max_nfev=20000
+        )
 
     params_hat = result.x
     log_eta = params_hat[0 : 2 * n_components : 2]
@@ -164,8 +187,14 @@ def fit_mixture_weibull(df_group, n_components=2):
     rmse = np.sqrt(np.mean(result.fun ** 2))
 
     output = {
-        "n_components": n_components,
+        # "n_components": n_components,
         "rmse": rmse,
+        "nfev": result.nfev,
+        # "success": result.success,
+        # "message": result.message,
+        "regularized": use_regularization,
+        # "n_points": len(x),
+        "n_params_effective": n_params_effective
     }
 
     for k in range(n_components):
@@ -183,7 +212,7 @@ def fit_by_throughput_percentile(df_long, n_components=2):
 
     fit_results = []
 
-    for tp, df_group in df_long.groupby("TTP_Percentile"):
+    for ttp_percentile, df_group in df_long.groupby("TTP_Percentile"):
         try:
             fit = fit_mixture_weibull(
                 df_group,
@@ -193,7 +222,8 @@ def fit_by_throughput_percentile(df_long, n_components=2):
             if fit is None:
                 continue
 
-            fit["TTP_Percentile"] = tp
+            fit["TTP_Percentile"] = ttp_percentile
+
             fit_results.append(fit)
 
         except Exception:
@@ -304,6 +334,7 @@ def build_global_mixture_weibull_cdf(
 
 
 def make_param_function(q_values, y_values, method="spline"):
+    
     q_values = np.asarray(q_values, dtype=float)
     y_values = np.asarray(y_values, dtype=float)
 
@@ -321,7 +352,6 @@ def make_param_function(q_values, y_values, method="spline"):
             y_values,
             deg=degree
         )
-
         return np.poly1d(coef)
 
     else:
@@ -520,7 +550,7 @@ def plot_weibull_parameter_trends(
     fig.update_yaxes(title_text="weight", row=1, col=3)
 
     fig.update_layout(
-        height=550,
+        height=500,
         width=1500,
         title="Weibull parameter trends with fitted curves",
         legend_title="Parameter"
@@ -628,3 +658,43 @@ def build_independent_mixture_weibull_cdf(
         return F
 
     return global_cdf
+
+
+def residuals_regularized_weibull(
+    params,
+    x,
+    p_obs,
+    n_components,
+    lambda_eta=0.01,
+    lambda_beta=0.01,
+    lambda_weight=0.01
+):
+    # 通常のCDF残差
+    p_pred = mixture_weibull_cdf(
+        x,
+        params,
+        n_components
+    )
+
+    data_resid = p_obs - p_pred
+
+    log_eta = params[0 : 2 * n_components : 2]
+    log_beta = params[1 : 2 * n_components : 2]
+    z_weight = params[2 * n_components : 3 * n_components]
+
+    # etaが極端に離れすぎるのを抑える
+    eta_center = np.mean(log_eta)
+    eta_penalty = np.sqrt(lambda_eta) * (log_eta - eta_center)
+
+    # betaが初期的に想定する beta=2 から極端に外れすぎるのを抑える
+    beta_penalty = np.sqrt(lambda_beta) * (log_beta - np.log(2.0))
+
+    # weightが極端に1成分へ集中しすぎるのを抑える
+    weight_penalty = np.sqrt(lambda_weight) * z_weight
+
+    return np.concatenate([
+        data_resid,
+        eta_penalty,
+        beta_penalty,
+        weight_penalty
+    ])

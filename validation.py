@@ -5,7 +5,6 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import math
 
-
 def make_qq_table_by_ttp(
     df_long,
     df_sample,
@@ -482,9 +481,19 @@ def plot_independent_qq(
 
 
 def make_validation_metrics_from_qq(df_qq):
+    import numpy as np
+    import pandas as pd
 
     if df_qq is None or df_qq.empty:
         return pd.DataFrame()
+
+    required_cols = ["Original", "Generated"]
+
+    for col in required_cols:
+        if col not in df_qq.columns:
+            raise ValueError(
+                f"df_qqに {col} 列がありません。現在の列: {df_qq.columns.tolist()}"
+            )
 
     df = df_qq[["Original", "Generated"]].dropna().copy()
 
@@ -494,31 +503,149 @@ def make_validation_metrics_from_qq(df_qq):
     y_true = df["Original"].to_numpy(dtype=float)
     y_pred = df["Generated"].to_numpy(dtype=float)
 
-    sse = np.sum((y_true - y_pred) ** 2)
-    sst = np.sum((y_true - np.mean(y_true)) ** 2)
+    # =========================
+    # Error metrics
+    # =========================
+
+    error = y_pred - y_true
+
+    rmse = np.sqrt(
+        np.mean(error ** 2)
+    )
+
+    mae = np.mean(
+        np.abs(error)
+    )
+
+    max_abs_error = np.max(
+        np.abs(error)
+    )
+
+    mean_error = np.mean(error)
+
+    # =========================
+    # QQ correlation R2
+    # =========================
+    # 相関係数^2。
+    # 0〜1の範囲になり、QQプロットの直線性を表す。
+    # ただし、傾き1・切片0かどうかは別途 slope/intercept で見る。
+
+    if len(y_true) < 2:
+        qq_corr = np.nan
+        qq_r2 = np.nan
+    elif np.std(y_true) == 0 or np.std(y_pred) == 0:
+        qq_corr = np.nan
+        qq_r2 = np.nan
+    else:
+        qq_corr = np.corrcoef(
+            y_true,
+            y_pred
+        )[0, 1]
+
+        qq_r2 = qq_corr ** 2
+
+    # =========================
+    # QQ regression line
+    # =========================
+    # Generated = slope * Original + intercept
+    #
+    # 理想:
+    #   slope     = 1
+    #   intercept = 0
+
+    if len(y_true) < 2 or np.std(y_true) == 0:
+        slope = np.nan
+        intercept = np.nan
+    else:
+        slope, intercept = np.polyfit(
+            y_true,
+            y_pred,
+            deg=1
+        )
+
+    # =========================
+    # Legacy R2: can be negative
+    # =========================
+    # 参考用。平均予測より悪いとマイナスになる。
+
+    sse = np.sum(
+        (y_true - y_pred) ** 2
+    )
+
+    sst = np.sum(
+        (y_true - np.mean(y_true)) ** 2
+    )
 
     if sst == 0:
-        r2 = np.nan
+        legacy_r2 = np.nan
     else:
-        r2 = 1 - sse / sst
-
-    rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
-    mae = np.mean(np.abs(y_true - y_pred))
+        legacy_r2 = 1 - sse / sst
 
     df_metrics = pd.DataFrame({
         "Metric": [
-            "R2",
+            "QQ_R2_corr",
+            "QQ_corr",
+            "QQ_slope",
+            "QQ_intercept",
             "RMSE",
-            "MAE"
+            "MAE",
+            "MaxAbsError",
+            "MeanError",
+            "Legacy_R2"
         ],
         "Value": [
-            r2,
+            qq_r2,
+            qq_corr,
+            slope,
+            intercept,
             rmse,
-            mae
+            mae,
+            max_abs_error,
+            mean_error,
+            legacy_r2
         ]
     })
 
     return df_metrics
+
+# def make_validation_metrics_from_qq(df_qq):
+
+#     if df_qq is None or df_qq.empty:
+#         return pd.DataFrame()
+
+#     df = df_qq[["Original", "Generated"]].dropna().copy()
+
+#     if df.empty:
+#         return pd.DataFrame()
+
+#     y_true = df["Original"].to_numpy(dtype=float)
+#     y_pred = df["Generated"].to_numpy(dtype=float)
+
+#     sse = np.sum((y_true - y_pred) ** 2)
+#     sst = np.sum((y_true - np.mean(y_true)) ** 2)
+
+#     if sst == 0:
+#         r2 = np.nan
+#     else:
+#         r2 = 1 - sse / sst
+
+#     rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
+#     mae = np.mean(np.abs(y_true - y_pred))
+
+#     df_metrics = pd.DataFrame({
+#         "Metric": [
+#             "R2",
+#             "RMSE",
+#             "MAE"
+#         ],
+#         "Value": [
+#             r2,
+#             rmse,
+#             mae
+#         ]
+#     })
+
+#     return df_metrics
 
 
 def plot_sample_distribution_overlay(
@@ -753,8 +880,6 @@ def plot_cdf_validation(
     analysis_mode="Independent",
     target_ttp=None
 ):
-    import numpy as np
-    import plotly.graph_objects as go
 
     if df_sample is None or df_sample.empty:
         return None
@@ -822,7 +947,7 @@ def plot_cdf_validation(
         title += f" - TTP={target_ttp:g}"
 
     fig.update_layout(
-        height=600,
+        height=800,
         title=title,
         xaxis_title=selected_feature,
         yaxis_title="Cumulative probability",
@@ -851,9 +976,6 @@ def plot_cdf_validation_grid(
     q_col="TTP_Percentile",
     ttp_bin_width=0.025
 ):
-    import numpy as np
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
 
     if df_sample is None or df_sample.empty:
         return None
@@ -972,7 +1094,7 @@ def plot_cdf_validation_grid(
         )
 
     fig.update_layout(
-        height=1200,
+        height=800,
         title="CDF validation by TTP Percentile",
         margin=dict(t=120, b=80, l=60, r=30),
         legend=dict(

@@ -22,6 +22,12 @@ from mixed_gaussian import (
     plot_gaussian_parameter_trends
 )
 
+from spline_model import (
+    fit_independent_spline_model,
+    fit_dependent_spline_model,
+    build_spline_sampler
+)
+
 from sampling import (
     build_bivariate_sampler,
     build_independent_sampler
@@ -77,6 +83,7 @@ default_keys = {
     "use_quantile_correction": False,
     "df_fit_results_dict": {},
     "global_cdf": None,
+    "global_ppf": None,
     "df_weibull_poly_coefficients": None,
     "df_weibull_param_coefficients": None,
 
@@ -120,9 +127,10 @@ tab_data, tab_viz, tab_fit, tab_sample, tab_valid, tab_export = st.tabs([
 
 with tab_data:
     st.header("1. Data Input")
+    st.divider()
 
     # =========================
-    # File path input
+    # 1-1. File path input
     # =========================
 
     st.subheader("Input files")
@@ -142,18 +150,14 @@ with tab_data:
         if st.button("Check Fleet Data file", key="check_fleetdata_file"):
             try:
                 path = Path(fleetdata_path)
-
                 if not path.exists():
                     st.error("Fleet data file does not exist.")
-
                 elif path.suffix.lower() not in [".xlsx", ".xls"]:
                     st.error("Please select an Excel file.")
-
                 else:
                     xls = pd.ExcelFile(fleetdata_path)
                     st.session_state["fleetdata_sheet_names"] = xls.sheet_names
                     st.success("Fleet data file checked successfully.")
-
             except Exception as e:
                 st.error(f"Failed to check fleet data file: {e}")
 
@@ -170,26 +174,22 @@ with tab_data:
         if st.button("Check Total Throughput file", key="check_ttp_file"):
             try:
                 path = Path(throughput_quantile_path)
-
                 if not path.exists():
                     st.warning(
-                        "Throughput quantile file does not exist. "
+                        "Total Throughput quantile file does not exist. "
                         "Independent data can still be loaded without this file."
                     )
-
                 elif path.suffix.lower() not in [".xlsx", ".xls"]:
                     st.error("Please select an Excel file.")
-
                 else:
-                    st.success("Throughput quantile file checked successfully.")
-
+                    st.success("Total Throughput quantile file checked successfully.")
             except Exception as e:
-                st.error(f"Failed to check throughput quantile file: {e}")
+                st.error(f"Failed to check Total Throughput quantile file: {e}")
 
     st.divider()
 
     # =========================
-    # Feature sheet selection
+    # 1-2. Feature sheet selection
     # =========================
 
     st.subheader("Feature selection")
@@ -198,7 +198,6 @@ with tab_data:
 
     if len(sheet_names) == 0:
         st.info("Fleet Data file を指定し、'Check Fleet Data file' を押してください。")
-
     else:
         selected_feature = st.selectbox(
             "解析したい特徴量",
@@ -207,14 +206,14 @@ with tab_data:
         )
 
         st.session_state["selected_feature"] = selected_feature
-
-        st.write(f"選択中の解析対象: **{selected_feature}**")
-
+        # st.write(f"選択中の解析対象: **{selected_feature}**")
         st.divider()
 
         # =========================
-        # Load data
+        # 1-3. Load data
         # =========================
+
+        st.subheader("Load Data")
 
         if st.button("Load Data", key="load_data"):
             try:
@@ -240,8 +239,7 @@ with tab_data:
                     analysis_mode = "TTP dependent"
 
                 st.session_state["analysis_mode"] = analysis_mode
-
-                st.info(f"Detected analysis mode: {analysis_mode}")
+                # st.info(f"Detected analysis mode: {analysis_mode}")
 
                 # =========================
                 # Long format
@@ -340,23 +338,12 @@ with tab_data:
     st.divider()
 
     # =========================
-    # Detected mode preview
+    # 1-4. Data Preview
     # =========================
 
-    st.subheader("Detected analysis mode")
+    st.subheader("Data Preview")
 
-    st.write(
-        st.session_state.get(
-            "analysis_mode",
-            "Not detected yet."
-        )
-    )
-
-    # =========================
-    # Data preview
-    # =========================
-
-    st.subheader("df_fleetdata")
+    st.write("df_fleetdata")
 
     if st.session_state["df_fleetdata"] is not None:
         st.dataframe(
@@ -366,7 +353,7 @@ with tab_data:
     else:
         st.info("df_fleetdata is not loaded yet.")
 
-    st.subheader("df_throughput_quantile")
+    st.write("df_throughput_quantile")
 
     if st.session_state.get("analysis_mode") == "TTP dependent":
 
@@ -394,22 +381,19 @@ with tab_viz:
     st.header("2. Data Visualization")
 
     df_long = st.session_state["df_long"]
+
     selected_feature = st.session_state.get(
         "selected_feature",
         "Value"
     )
 
     if df_long is None:
-
         st.info("Please load data first.")
-
     else:
-
         analysis_mode = st.session_state.get(
             "analysis_mode",
             "TTP dependent"
         )
-
         color_col = (
             "TTP_Percentile"
             if "TTP_Percentile" in df_long.columns
@@ -424,7 +408,7 @@ with tab_viz:
 
         with col1:
 
-            st.subheader("Plot settings")
+            # st.subheader("Plot settings")
 
             st.markdown("#### Graph size")
 
@@ -432,7 +416,7 @@ with tab_viz:
                 "Plot height",
                 min_value=400,
                 max_value=1000,
-                value=700,
+                value=600,
                 step=50
             )
 
@@ -493,11 +477,12 @@ with tab_viz:
 
 with tab_fit:
     st.header("3. Model Fitting")
+    st.divider()
 
     df_long = st.session_state["df_long"]
 
     # =========================
-    # Model selection
+    # 3-1. Model selection
     # =========================
 
     st.subheader("Model selection")
@@ -507,17 +492,17 @@ with tab_fit:
         options=[
             "混合ワイブルモデル",
             "混合正規分布モデル",
-            "2次元スプライン補完",
+            "スプライン補完モデル",
         ],
         index=[
             "混合ワイブルモデル",
             "混合正規分布モデル",
-            "2次元スプライン補完",
+            "スプライン補完モデル",
         ].index(st.session_state["model_type"])
         if st.session_state["model_type"] in [
             "混合ワイブルモデル",
             "混合正規分布モデル",
-            "2次元スプライン補完",
+            "スプライン補完モデル",
         ]
         else 0
     )
@@ -527,7 +512,7 @@ with tab_fit:
     st.divider()
 
     # =========================
-    # Model-specific settings
+    # 3-2. Model-specific settings
     # =========================
 
     st.subheader("Model settings")
@@ -536,6 +521,7 @@ with tab_fit:
 
         col1, col2 = st.columns([1, 1])
 
+        # モデルの項数を取得
         with col1:
             current_n_components = st.session_state.get("selected_n_components", 2)
 
@@ -550,6 +536,7 @@ with tab_fit:
 
             st.session_state["selected_n_components"] = selected_n_components
 
+        # TTP方向の補完方法を取得
         with col2:
             param_fit_method_ui = st.selectbox(
                 "TTP方向のパラメータ補完方法",
@@ -569,9 +556,7 @@ with tab_fit:
             )
 
             st.session_state["param_fit_method_ui"] = param_fit_method_ui
-
-            # 既存ワイブルコードとの互換用
-            st.session_state["weibull_param_fit_method"] = param_fit_method_ui
+            # st.session_state["weibull_param_fit_method"] = param_fit_method_ui
 
         st.info(
             f"選択中: {model_type} / "
@@ -579,10 +564,10 @@ with tab_fit:
             f"TTP方向: {param_fit_method_ui}"
         )
 
-    elif model_type == "2次元スプライン補完":
+    elif model_type == "スプライン補完モデル":
 
         st.info(
-            "2次元スプライン補完では、次数と分位点補正の設定は使用しません。"
+            "スプライン補完では、項数とTTP方向の補完方法の設定は不要です。"
         )
 
         st.session_state["use_quantile_correction"] = False
@@ -622,7 +607,7 @@ with tab_fit:
                         "3次多項式": "poly3"
                     }
 
-                    method_ui = st.session_state["weibull_param_fit_method"]
+                    method_ui = st.session_state["param_fit_method_ui"]
                     param_fit_method = method_map[method_ui]
 
                     # =========================
@@ -631,6 +616,7 @@ with tab_fit:
 
                     if analysis_mode == "TTP dependent":
 
+                        # 各TTPパーセンタイルごとにFitting
                         df_fit = fit_by_throughput_percentile(
                             df_long,
                             n_components=n_components
@@ -642,6 +628,7 @@ with tab_fit:
 
                         st.session_state["df_fit_results_dict"] = df_fit_results_dict
 
+                        # TTP方向にパラメータを補完
                         if df_fit.empty:
                             st.session_state["global_cdf"] = None
                             st.session_state["df_weibull_param_coefficients"] = None
@@ -652,7 +639,7 @@ with tab_fit:
 
                         else:
                             global_cdf = build_global_mixture_weibull_cdf(
-                                df_fit_results_dict,
+                                df_fit_results_dict=df_fit_results_dict,
                                 n_components=n_components,
                                 q_col="TTP_Percentile",
                                 param_fit_method=param_fit_method
@@ -746,13 +733,14 @@ with tab_fit:
                     method_ui = st.session_state.get(
                         "param_fit_method_ui",
                         st.session_state.get(
-                            "weibull_param_fit_method",
+                            "param_fit_method_ui"
                             "3次スプライン補完"
                         )
                     )
 
                     param_fit_method = method_map[method_ui]
 
+                    # 従属パラメータ
                     if analysis_mode == "TTP dependent":
 
                         df_fit = fit_gaussian_by_throughput_percentile(
@@ -809,8 +797,8 @@ with tab_fit:
                                 f"混合正規分布モデル {n_components}成分のフィッティングとGlobal model作成が完了しました。"
                             )
 
+                    # 非従属パラメータ
                     else:
-
                         df_fit = fit_independent_mixture_gaussian(
                             df_long=df_long,
                             n_components=n_components,
@@ -851,19 +839,49 @@ with tab_fit:
                             )
 
                 # =========================
-                # 2次元スプライン補完
+                # スプライン補完モデル
                 # =========================
-                elif model_type == "2次元スプライン補完":
+                elif model_type == "スプライン補完モデル":
 
-                    # TODO: 2次元スプライン補完関数を接続
-                    # spline_model = fit_2d_spline_model(df_long)
+                    analysis_mode = st.session_state.get(
+                        "analysis_mode",
+                        "TTP dependent"
+                    )
 
-                    spline_model = None
+                    if analysis_mode == "TTP dependent":
 
-                    st.session_state["global_cdf"] = spline_model
-                    st.session_state["df_fit_results_dict"] = {}
+                        result_spline = fit_dependent_spline_model(
+                            df_long=df_long,
+                            q_col="TTP_Percentile",
+                            p_col="value_Percentile",
+                            value_col="value"
+                        )
 
-                    st.info("2次元スプライン補完モデルはまだ未実装です。")
+                    else:
+
+                        result_spline = fit_independent_spline_model(
+                            df_long=df_long,
+                            p_col="value_Percentile",
+                            value_col="value"
+                        )
+
+                    df_fit = result_spline["df_fit"]
+                    global_cdf = result_spline["global_cdf"]
+                    global_ppf = result_spline["global_ppf"]
+
+                    st.session_state["df_fit_results_dict"] = {
+                        1: df_fit
+                    }
+
+                    st.session_state["global_cdf"] = global_cdf
+                    st.session_state["global_ppf"] = global_ppf
+
+                    st.session_state["df_param_coefficients"] = None
+                    st.session_state["df_weibull_param_coefficients"] = None
+                    st.session_state["fig_param_trends"] = None
+                    st.session_state["fig_weibull_param_trends"] = None
+
+                    st.success("スプライン補完モデルの作成が完了しました。")
 
             except Exception as e:
                 st.session_state["global_cdf"] = None
@@ -879,14 +897,12 @@ with tab_fit:
 
     if st.session_state["df_fit_results_dict"]:
         for n, df_fit in st.session_state["df_fit_results_dict"].items():
-            with st.expander(f"{n} component fit result"):
-                if df_fit is not None and not df_fit.empty:
-                    st.dataframe(df_fit, use_container_width=True)
-                else:
-                    st.info("No fit result.")
+            if df_fit is not None and not df_fit.empty:
+                st.dataframe(df_fit, use_container_width=True)
+            else:
+                st.info("No fit result.")
     else:
         st.info("No fitting result yet.")
-
     
     st.subheader("Parameter coefficients")
 
@@ -933,7 +949,7 @@ with tab_fit:
                 method_ui = st.session_state.get(
                     "param_fit_method_ui",
                     st.session_state.get(
-                        "weibull_param_fit_method",
+                        "param_fit_method_ui",
                         "3次スプライン補完"
                     )
                 )
@@ -980,9 +996,18 @@ with tab_fit:
 
 with tab_sample:
     st.header("4. Random Sampling")
+    st.divider()
 
     selected_feature = st.session_state.get("selected_feature", "value")
     analysis_mode = st.session_state.get("analysis_mode", "TTP dependent")
+    model_type = st.session_state.get("model_type", "混合ワイブルモデル")
+
+    if model_type == "混合ワイブルモデル":
+        model_family = "weibull"
+    elif model_type == "混合正規分布モデル":
+        model_family = "gaussian"
+    else:
+        model_family = "weibull"
 
     # =========================
     # Sampling settings
@@ -1022,12 +1047,14 @@ with tab_sample:
     st.session_state["use_quantile_correction"] = use_quantile_correction
 
     st.info(f"Analysis mode: {analysis_mode}")
+    st.info(f"Model type: {model_type}")
 
     st.divider()
 
     # =========================
     # Pre-check
     # =========================
+    st.subheader("Generated sample visualization")
 
     if st.session_state["global_cdf"] is None:
         st.info("Please run fitting first.")
@@ -1041,14 +1068,22 @@ with tab_sample:
     else:
         if st.button("Generate random samples", key="generate_random_samples"):
             try:
+
                 # =========================
                 # Sampling
                 # =========================
 
-                if analysis_mode == "TTP dependent":
-                    sampler = build_bivariate_sampler(
-                        df_throughput_quantile=st.session_state["df_throughput_quantile"],
-                        global_cdf=st.session_state["global_cdf"],
+                model_type = st.session_state.get(
+                    "model_type",
+                    "混合ワイブルモデル"
+                )
+
+                if model_type == "スプライン補完モデル":
+
+                    sampler = build_spline_sampler(
+                        global_ppf=st.session_state["global_ppf"],
+                        analysis_mode=analysis_mode,
+                        df_throughput_quantile=st.session_state.get("df_throughput_quantile"),
                         q_col="TTP_Percentile",
                         throughput_col="TTP"
                     )
@@ -1059,14 +1094,31 @@ with tab_sample:
                     )
 
                 else:
-                    sampler = build_independent_sampler(
-                        global_cdf=st.session_state["global_cdf"]
-                    )
 
-                    df_sample = sampler(
-                        n_samples=st.session_state["n_samples"],
-                        random_state=st.session_state["random_state"]
-                    )
+                    if analysis_mode == "TTP dependent":
+                        sampler = build_bivariate_sampler(
+                            df_throughput_quantile=st.session_state["df_throughput_quantile"],
+                            global_cdf=st.session_state["global_cdf"],
+                            q_col="TTP_Percentile",
+                            throughput_col="TTP",
+                            model_family=model_family
+                        )
+
+                        df_sample = sampler(
+                            n_samples=st.session_state["n_samples"],
+                            random_state=st.session_state["random_state"]
+                        )
+
+                    else:
+                        sampler = build_independent_sampler(
+                            global_cdf=st.session_state["global_cdf"],
+                            model_family=model_family
+                        )
+
+                        df_sample = sampler(
+                            n_samples=st.session_state["n_samples"],
+                            random_state=st.session_state["random_state"]
+                        )
 
                 # =========================
                 # Quantile correction
@@ -1103,6 +1155,8 @@ with tab_sample:
 
             except Exception as e:
                 st.error(f"Failed to generate random samples: {e}")
+        
+        st.divider()
 
         # =========================
         # Visualization
@@ -1112,8 +1166,6 @@ with tab_sample:
             df_sample = st.session_state["df_sample"]
 
             if not df_sample.empty:
-
-                st.subheader("Generated sample visualization")
 
                 value_min = float(df_sample["value"].min())
                 value_max = float(df_sample["value"].max())
@@ -1147,7 +1199,6 @@ with tab_sample:
                     )
                 else:
                     st.info("No PDF + histogram plot available.")
-
 
                 # =========================
                 # Scatter
@@ -1237,6 +1288,7 @@ with tab_sample:
 with tab_valid:
 
     st.header("5. Validation")
+    st.divider()
 
     df_long = st.session_state["df_long"]
     df_sample = st.session_state["df_sample"]
@@ -1314,23 +1366,52 @@ with tab_valid:
         df_metrics = st.session_state.get("df_validation_metrics")
 
         if df_metrics is not None and not df_metrics.empty:
+
+            metric_dict = dict(
+                zip(
+                    df_metrics["Metric"],
+                    df_metrics["Value"]
+                )
+            )
+
+            col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+
+            with col_m1:
+                qq_r2 = metric_dict.get("QQ_R2_corr", np.nan)
+                st.metric(
+                    label="QQ R²",
+                    value=f"{qq_r2:.4f}" if pd.notna(qq_r2) else "NaN"
+                )
+
+            with col_m2:
+                slope = metric_dict.get("QQ_slope", np.nan)
+                st.metric(
+                    label="QQ slope",
+                    value=f"{slope:.4f}" if pd.notna(slope) else "NaN"
+                )
+
+            with col_m3:
+                rmse = metric_dict.get("RMSE", np.nan)
+                st.metric(
+                    label="RMSE",
+                    value=f"{rmse:.4g}" if pd.notna(rmse) else "NaN"
+                )
+
+            with col_m4:
+                mae = metric_dict.get("MAE", np.nan)
+                st.metric(
+                    label="MAE",
+                    value=f"{mae:.4g}" if pd.notna(mae) else "NaN"
+                )
+
             st.dataframe(
                 df_metrics,
                 use_container_width=True
             )
 
-            r2_value = df_metrics.loc[
-                df_metrics["Metric"] == "R2",
-                "Value"
-            ].iloc[0]
-
-            st.metric(
-                label="R²",
-                value=f"{r2_value:.4f}"
-            )
         else:
             st.info("No validation metrics yet.")
-        
+
         st.divider()
 
         # =========================
@@ -1338,11 +1419,6 @@ with tab_valid:
         # =========================
 
         st.subheader("CDF validation")
-
-        analysis_mode = st.session_state.get(
-            "analysis_mode",
-            "TTP dependent"
-        )
 
         try:
             if analysis_mode == "TTP dependent":
@@ -1415,7 +1491,7 @@ with tab_valid:
 
             except Exception as e:
                 st.error(f"Failed to plot Q-Q plot: {e}")
-            
+
             st.divider()
 
             st.subheader("Q-Q table")
@@ -1457,6 +1533,12 @@ with tab_export:
     export_qq = st.checkbox(
         "Export Q-Q plot data",
         value=True
+    )
+
+    export_param_coefficients = st.checkbox(
+        "Parameter coefficients",
+        value=False,
+        key="export_param_coefficients"
     )
 
     st.divider()
@@ -1530,3 +1612,31 @@ with tab_export:
             )
         else:
             st.info("No Q-Q plot data available.")
+    
+
+    if export_param_coefficients:
+        df_coef = None
+
+        model_type = st.session_state.get("model_type")
+
+        if model_type == "混合ワイブルモデル":
+            df_coef = st.session_state.get("df_weibull_param_coefficients")
+
+        elif model_type == "混合正規分布モデル":
+            df_coef = st.session_state.get("df_param_coefficients")
+
+        else:
+            df_coef = st.session_state.get("df_param_coefficients")
+
+        if df_coef is not None and not df_coef.empty:
+            csv = df_coef.to_csv(index=False).encode("utf-8-sig")
+
+            st.download_button(
+                label="Download parameter coefficients CSV",
+                data=csv,
+                file_name=f"{base_filename}_parameter_coefficients.csv",
+                mime="text/csv",
+                key="download_parameter_coefficients_csv"
+            )
+        else:
+            st.info("No parameter coefficient result to export.")
